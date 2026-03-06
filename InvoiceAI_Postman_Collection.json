@@ -1,0 +1,353 @@
+{
+  "info": {
+    "name": "InvoiceAI API v2",
+    "description": "Complete API testing collection for AI Invoice & Expense Manager",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:5000/api" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/auth/register",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"John Doe\",\n  \"email\": \"john@example.com\",\n  \"password\": \"password123\",\n  \"company\": \"Acme Corp\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.token) pm.collectionVariables.set('token', res.token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/auth/login",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"john@example.com\",\n  \"password\": \"password123\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Google OAuth",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/auth/google",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"<google-id-token-here>\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/auth/me",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/auth/logout",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Invoices",
+      "item": [
+        {
+          "name": "List Invoices",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/invoices/?status=draft&search=acme",
+              "query": [
+                { "key": "status", "value": "draft" },
+                { "key": "search", "value": "acme" }
+              ]
+            },
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Create Invoice",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/invoices/",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_name\": \"Acme Corporation\",\n  \"client_email\": \"billing@acme.com\",\n  \"amount\": 5000,\n  \"tax\": 900,\n  \"description\": \"Software consulting and development services\",\n  \"due_date\": \"2025-03-31\",\n  \"status\": \"draft\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Invoice",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/invoices/1",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Update Invoice Status",
+          "request": {
+            "method": "PUT",
+            "url": "{{base_url}}/invoices/1",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"paid\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete Invoice",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/invoices/1",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Upload Invoice (OCR)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/invoices/upload",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": "/path/to/invoice.pdf" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Expenses",
+      "item": [
+        {
+          "name": "List Expenses",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/expenses/?search=lunch&start_date=2025-01-01&end_date=2025-01-31",
+              "query": [
+                { "key": "search", "value": "lunch" },
+                { "key": "start_date", "value": "2025-01-01" },
+                { "key": "end_date", "value": "2025-01-31" }
+              ]
+            },
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Create Expense (AI Categorized)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/expenses/",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"AWS Cloud Hosting\",\n  \"amount\": 3500,\n  \"vendor\": \"Amazon Web Services\",\n  \"description\": \"Monthly cloud server and storage costs\",\n  \"receipt_date\": \"2025-01-15\",\n  \"payment_method\": \"credit_card\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Update Expense",
+          "request": {
+            "method": "PUT",
+            "url": "{{base_url}}/expenses/1",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 4000,\n  \"status\": \"approved\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete Expense",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/expenses/1",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "Summary Stats",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/dashboard/summary",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Monthly Chart",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/dashboard/chart/monthly",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Category Chart",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/dashboard/chart/categories",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Recent Transactions",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/dashboard/recent",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "OCR",
+      "item": [
+        {
+          "name": "Extract Invoice (OCR)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/ocr/extract",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": "/path/to/invoice.png" }]
+            }
+          }
+        },
+        {
+          "name": "Test OCR Services",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/ocr/test",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "AI Predictions",
+      "item": [
+        {
+          "name": "Next Month Forecast",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/predictions/next-month",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Anomaly Detection",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/predictions/anomalies",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Duplicate Detection",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/predictions/duplicates",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        },
+        {
+          "name": "Budget Recommendations",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/predictions/budget-recommendation",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "AI Insights",
+      "item": [
+        {
+          "name": "Get All Insights",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/insights/",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Categories",
+      "item": [
+        {
+          "name": "List Categories",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/categories/",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }]
+          }
+        }
+      ]
+    }
+  ]
+}
