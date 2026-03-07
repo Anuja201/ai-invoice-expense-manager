@@ -1,0 +1,22 @@
+flask==3.0.0
+flask-cors==4.0.0
+flask-jwt-extended==4.6.0
+pymysql==1.1.0
+bcrypt==4.1.1
+python-dotenv==1.0.0
+requests==2.31.0
+
+# OCR dependencies
+pytesseract==0.3.10
+Pillow==10.1.0
+pdfplumber==0.10.3
+pdf2image==1.16.3
+
+# ML / Data science (install as needed)
+# scikit-learn==1.4.0
+# numpy==1.26.0
+# pandas==2.1.0
+# easyocr==1.7.1
+
+# Production extras
+# gunicorn==21.2.0
