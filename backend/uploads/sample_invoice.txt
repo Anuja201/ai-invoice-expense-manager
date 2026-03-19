@@ -1,0 +1,16 @@
+INVOICE #INV-2025-1234
+Date: 2025-01-15
+Due Date: 2025-02-15
+
+Vendor: TechSoft Solutions Pvt Ltd
+123 Tech Park, Bangalore
+
+Description: Software Development Services
+Quantity: 1
+Rate: 5000.00
+Subtotal: 5000.00
+Tax (18%): 900.00
+Total Amount: 5900.00
+
+Payment Terms: Net 30
+
