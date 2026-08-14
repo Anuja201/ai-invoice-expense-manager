@@ -1,10 +1,10 @@
 /**
  * pages/Invoices.jsx
- * Invoice management: list, create, upload (simulate), delete, status update
+ * Invoice management: list, create, upload (PDF/Image) with editable OCR fields, delete, status update
  */
 
-import { useState, useEffect, useRef } from 'react';
-import { invoiceService, ocrService } from '../services/api';
+import { useState, useEffect } from 'react';
+import { invoiceService } from '../services/api';
 import '../styles/DataPage.css';
 
 const fmt = (n) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n);
@@ -16,18 +16,21 @@ export default function Invoices() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [showUploadModal, setShowUploadModal] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [uploadLoading, setUploadLoading] = useState(false);
-  const [uploadResult, setUploadResult] = useState(null);
-  const [editInvoice, setEditInvoice] = useState(null); // for status update
-  const [error, setError] = useState('');
 
+  // Manual Create Modal
+  const [showModal, setShowModal] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
   const [form, setForm] = useState({
     client_name: '', client_email: '', amount: '',
     tax: '', description: '', due_date: '', status: 'draft'
   });
+
+  // Upload Modal & OCR state
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
+  const [ocrForm, setOcrForm] = useState(null);
 
   const fetchInvoices = async () => {
     try {
@@ -84,7 +87,6 @@ export default function Invoices() {
     }
   };
 
-
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this invoice?')) return;
     try {
@@ -104,31 +106,16 @@ export default function Invoices() {
     }
   };
 
-  const handleUploadSimulate = async () => {
-    setUploadLoading(true);
-    setUploadResult(null);
-    try {
-      const res = await invoiceService.upload(new File([], 'sample.pdf'));
-      setUploadResult(res.data.extracted_data);
-    } catch (err) {
-      setUploadResult({ error: 'Upload simulation failed' });
-    } finally {
-      setUploadLoading(false);
-    }
-  };
-
   const handleRealUpload = async (file) => {
     if (!file) return;
 
-    // Validate extension
     const ext = file.name.split('.').pop().toLowerCase();
-    const allowed = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'];
+    const allowed = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp', 'webp'];
     if (!allowed.includes(ext)) {
       setUploadResult({ error: `Invalid file type '.${ext}'. Allowed types: ${allowed.join(', ')}` });
       return;
     }
 
-    // Validate size (16MB max)
     const maxSize = 16 * 1024 * 1024;
     if (file.size > maxSize) {
       setUploadResult({ error: 'File exceeds maximum limit of 16MB.' });
@@ -137,53 +124,95 @@ export default function Invoices() {
 
     setUploadLoading(true);
     setUploadResult(null);
+    setOcrForm(null);
+
     try {
       const res = await invoiceService.upload(file);
-      const data = res.data.extracted_data;
+      const data = res.data.extracted_data || {};
 
       setUploadResult({
         ...data,
-        extraction_method: res.data.extraction_method || data.extraction_method || 'ocr',
+        extraction_method: res.data.extraction_method || data.extraction_method || 'AI OCR',
         invoice_saved: !!res.data.invoice,
-        invoice: res.data.invoice || null,
         file_name: res.data.file_name,
         file_url: res.data.file_url,
         message: res.data.message,
       });
+
+      setOcrForm({
+        client_name: data.vendor || data.client_name || '',
+        client_email: data.client_email || '',
+        amount: data.subtotal !== undefined && data.subtotal !== null ? data.subtotal : (data.amount || ''),
+        tax: data.tax !== undefined && data.tax !== null ? data.tax : 0,
+        due_date: data.due_date || data.date || '',
+        status: 'draft',
+        description: data.line_items && data.line_items.length > 0
+          ? data.line_items.map(i => i.description).filter(Boolean).join(', ')
+          : (data.description || `Uploaded invoice: ${file.name}`),
+        ai_category: data.ai_category || 'Uncategorized',
+        ai_confidence: data.ai_confidence || 80,
+      });
     } catch (err) {
       const resp = err.response?.data;
-      if (err.response?.status === 422 && resp?.extracted_data) {
-        const data = resp.extracted_data;
-        setUploadResult({
-          ...data,
-          error: resp.message || resp.error || 'Manual review required',
-          needs_manual_review: data.needs_manual_review || true,
-          requires_review: data.requires_review || true,
-          manual_review_reason: data.manual_review_reason,
-          file_name: resp.file_name,
-          file_url: resp.file_url,
-          extraction_method: resp.extraction_method || data.extraction_method || 'ocr',
-        });
-      } else {
-        setUploadResult({ error: err.response?.data?.error || 'OCR extraction failed. Please try again.' });
-      }
+      const data = resp?.extracted_data || {};
+      setUploadResult({
+        ...data,
+        error: resp?.message || resp?.error || 'OCR extraction failed',
+        needs_manual_review: true,
+        file_name: resp?.file_name,
+        file_url: resp?.file_url,
+        extraction_method: resp?.extraction_method || 'AI OCR',
+      });
+
+      setOcrForm({
+        client_name: data.vendor || data.client_name || '',
+        client_email: data.client_email || '',
+        amount: data.subtotal !== undefined && data.subtotal !== null ? data.subtotal : (data.amount || ''),
+        tax: data.tax !== undefined && data.tax !== null ? data.tax : 0,
+        due_date: data.due_date || data.date || '',
+        status: 'draft',
+        description: data.description || `Uploaded invoice: ${file.name}`,
+        ai_category: data.ai_category || 'Uncategorized',
+        ai_confidence: data.ai_confidence || 80,
+      });
     } finally {
       setUploadLoading(false);
     }
   };
 
-  const handleSaveUploaded = async () => {
-    if (!uploadResult) return;
-    if (uploadResult.invoice_saved) {
-      setShowUploadModal(false);
-      setUploadResult(null);
-      await fetchInvoices();
+  const handleSaveUploaded = async (e) => {
+    if (e) e.preventDefault();
+    if (!ocrForm) return;
+
+    const amountNum = parseFloat(ocrForm.amount);
+    const taxNum = parseFloat(ocrForm.tax || 0);
+
+    if (!ocrForm.client_name.trim()) {
+      setUploadResult(prev => ({ ...prev, error: 'Client Name is required' }));
+      return;
+    }
+    if (isNaN(amountNum) || amountNum <= 0) {
+      setUploadResult(prev => ({ ...prev, error: 'Amount must be a positive number' }));
       return;
     }
 
-    alert('Invoice cannot be saved automatically because OCR requires manual review. Please correct the file or review the extracted data.');
+    setSubmitting(true);
+    try {
+      await invoiceService.create({
+        ...ocrForm,
+        amount: amountNum,
+        tax: taxNum,
+      });
+      setShowUploadModal(false);
+      setUploadResult(null);
+      setOcrForm(null);
+      await fetchInvoices();
+    } catch (err) {
+      setUploadResult(prev => ({ ...prev, error: err.response?.data?.error || 'Failed to save invoice' }));
+    } finally {
+      setSubmitting(false);
+    }
   };
-
 
   return (
     <div className="data-page fade-in">
@@ -191,10 +220,10 @@ export default function Invoices() {
       <div className="page-header">
         <div className="page-header-left">
           <h1>Invoices</h1>
-          <p>Manage client invoices with AI categorization</p>
+          <p>Manage client invoices with AI categorization & OCR upload</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-secondary" onClick={() => setShowUploadModal(true)}>
+          <button className="btn btn-secondary" onClick={() => { setShowUploadModal(true); setUploadResult(null); setOcrForm(null); }}>
             📄 Upload PDF
           </button>
           <button className="btn btn-primary" onClick={() => setShowModal(true)}>
@@ -231,7 +260,7 @@ export default function Invoices() {
             <div className="empty-state">
               <div className="empty-state-icon">🧾</div>
               <h3>No invoices found</h3>
-              <p>Create your first invoice or change filters</p>
+              <p>Create your first invoice or upload an invoice PDF/image</p>
             </div>
           ) : (
             <table className="data-table">
@@ -300,7 +329,7 @@ export default function Invoices() {
         </div>
       </div>
 
-      {/* Create Modal */}
+      {/* Manual Create Modal */}
       {showModal && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowModal(false)}>
           <div className="modal">
@@ -365,68 +394,123 @@ export default function Invoices() {
         </div>
       )}
 
-      {/* Upload Modal */}
+      {/* Upload Modal with Editable OCR Fields */}
       {showUploadModal && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowUploadModal(false)}>
           <div className="modal">
             <div className="modal-header">
               <div>
-                <div className="modal-title">Upload Invoice PDF</div>
-                <div className="modal-subtitle">AI will extract and categorize invoice data</div>
+                <div className="modal-title">Upload Invoice PDF / Image</div>
+                <div className="modal-subtitle">AI will extract details — review & edit fields before saving</div>
               </div>
-              <button className="modal-close" onClick={() => { setShowUploadModal(false); setUploadResult(null); }}>✕</button>
+              <button className="modal-close" onClick={() => { setShowUploadModal(false); setUploadResult(null); setOcrForm(null); }}>✕</button>
             </div>
             <div className="modal-body">
-              <div
-                className="upload-zone"
-                onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('dragover'); }}
-                onDragLeave={e => e.currentTarget.classList.remove('dragover')}
-                onDrop={e => {
-                  e.preventDefault();
-                  e.currentTarget.classList.remove('dragover');
-                  const file = e.dataTransfer.files[0];
-                  if (file) handleRealUpload(file);
-                }}
-                onClick={() => {
-                  const input = document.createElement('input');
-                  input.type = 'file';
-                  input.accept = '.pdf,.png,.jpg,.jpeg,.tiff,.bmp';
-                  input.onchange = e => handleRealUpload(e.target.files[0]);
-                  input.click();
-                }}
-              >
-                <div className="upload-zone-icon">📄</div>
-                <div className="upload-zone-title">Drop PDF or Image Here</div>
-                <div className="upload-zone-sub">Supports PDF, PNG, JPG, TIFF — AI will extract all details via OCR</div>
-              </div>
+              {uploadResult?.error && <div className="error-message" style={{ marginBottom: 14 }}>{uploadResult.error}</div>}
 
-              {uploadLoading && (
-                <div style={{ textAlign:'center', padding: 20 }}>
-                  <div style={{ width:24, height:24, border:'3px solid var(--border)', borderTopColor:'var(--primary)', borderRadius:'50%', animation:'spin 0.7s linear infinite', margin:'0 auto 8px' }} />
-                  <p style={{ fontSize:13, color:'var(--text-muted)' }}>AI parsing invoice...</p>
+              {!ocrForm && !uploadLoading && (
+                <div
+                  className="upload-zone"
+                  onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('dragover'); }}
+                  onDragLeave={e => e.currentTarget.classList.remove('dragover')}
+                  onDrop={e => {
+                    e.preventDefault();
+                    e.currentTarget.classList.remove('dragover');
+                    const file = e.dataTransfer.files[0];
+                    if (file) handleRealUpload(file);
+                  }}
+                  onClick={() => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = '.pdf,.png,.jpg,.jpeg,.tiff,.bmp,.webp';
+                    input.onchange = e => handleRealUpload(e.target.files[0]);
+                    input.click();
+                  }}
+                >
+                  <div className="upload-zone-icon">📄</div>
+                  <div className="upload-zone-title">Drop Invoice Image or PDF Here</div>
+                  <div className="upload-zone-sub">Supports PDF, PNG, JPG, TIFF, WEBP — AI will extract fields</div>
                 </div>
               )}
 
-              {uploadResult && !uploadResult.error && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ background: 'var(--success-light)', border: '1px solid #A7F3D0', borderRadius: 'var(--radius-sm)', padding: 14, marginBottom: 12 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--success)', marginBottom: 8 }}>
-                      ✅ Invoice Extracted — {uploadResult.extraction_method || 'AI'}
-                    </div>
-                    <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                      <b>Vendor/Client:</b> {uploadResult.client_name}<br />
-                      <b>Amount:</b> ₹{(uploadResult.amount || 0).toLocaleString()}<br />
-                      <b>Tax:</b> ₹{(uploadResult.tax || 0).toLocaleString()}<br />
-                      <b>AI Category:</b> {uploadResult.ai_category} ({uploadResult.ai_confidence}% confidence)
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => setUploadResult(null)}>Re-scan</button>
-                    <button className="btn btn-primary btn-sm" onClick={handleSaveUploaded} disabled={submitting}>
-                      {submitting ? <span className="spinner" /> : 'Save Invoice'}
-                    </button>
-                  </div>
+              {uploadLoading && (
+                <div style={{ textAlign: 'center', padding: 28 }}>
+                  <div style={{ width: 28, height: 28, border: '3px solid var(--border)', borderTopColor: 'var(--primary)', borderRadius: '50%', animation: 'spin 0.7s linear infinite', margin: '0 auto 12px' }} />
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>AI parsing invoice & extracting fields...</p>
                 </div>
+              )}
+
+              {ocrForm && !uploadLoading && (
+                <form onSubmit={handleSaveUploaded} className="modal-form" style={{ marginTop: 4 }}>
+                  <div style={{ background: 'var(--success-light)', border: '1px solid #A7F3D0', borderRadius: 'var(--radius-sm)', padding: 12, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--success)', marginBottom: 2 }}>
+                      ✅ Invoice Extracted ({uploadResult?.extraction_method || 'AI OCR'})
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      Please review and edit any extracted fields below before saving.
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Client Name *</label>
+                      <input className="form-input" name="client_name" value={ocrForm.client_name} onChange={e => setOcrForm(f => ({ ...f, client_name: e.target.value }))} required />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Client Email</label>
+                      <input className="form-input" type="email" name="client_email" value={ocrForm.client_email} onChange={e => setOcrForm(f => ({ ...f, client_email: e.target.value }))} placeholder="client@acme.com" />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Amount (₹) *</label>
+                      <input className="form-input" type="number" name="amount" value={ocrForm.amount} onChange={e => setOcrForm(f => ({ ...f, amount: e.target.value }))} min="0.01" step="0.01" required />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Tax (₹)</label>
+                      <input className="form-input" type="number" name="tax" value={ocrForm.tax} onChange={e => setOcrForm(f => ({ ...f, tax: e.target.value }))} min="0" step="0.01" />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Due Date</label>
+                      <input className="form-input" type="date" name="due_date" value={ocrForm.due_date} onChange={e => setOcrForm(f => ({ ...f, due_date: e.target.value }))} />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Status</label>
+                      <select className="form-select" name="status" value={ocrForm.status} onChange={e => setOcrForm(f => ({ ...f, status: e.target.value }))}>
+                        {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Description / Line Items</label>
+                    <textarea className="form-textarea" name="description" value={ocrForm.description} onChange={e => setOcrForm(f => ({ ...f, description: e.target.value }))} />
+                  </div>
+
+                  {ocrForm.ai_category && (
+                    <div style={{ marginBottom: 14 }}>
+                      <span className="category-pill" style={{ background: '#4F46E518', color: '#4F46E5', fontSize: 13 }}>
+                        🤖 {ocrForm.ai_category} ({ocrForm.ai_confidence}% confidence)
+                      </span>
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: 10, justifyContent: 'space-between', alignItems: 'center', marginTop: 20 }}>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setOcrForm(null); setUploadResult(null); }}>
+                      🔄 Re-scan / Select File
+                    </button>
+                    <div style={{ display: 'flex', gap: 10 }}>
+                      <button type="button" className="btn btn-secondary" onClick={() => setShowUploadModal(false)}>Cancel</button>
+                      <button type="submit" className="btn btn-primary" disabled={submitting}>
+                        {submitting ? <span className="spinner" /> : '💾 Save Invoice'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
               )}
             </div>
           </div>

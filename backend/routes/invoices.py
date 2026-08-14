@@ -317,107 +317,29 @@ def upload_invoice():
     try:
 
         # ========================================================
-        # 4. RUN OCR
+        # 4. RUN OCR & LOG RESULTS
         # ========================================================
 
-        from routes.ocr import (
-            extract_invoice_data_from_file
+        from routes.ocr import extract_invoice_data_from_file
+
+        extracted, extraction_method = extract_invoice_data_from_file(
+            permanent_path,
+            filename
         )
 
-        extracted, extraction_method = (
-            extract_invoice_data_from_file(
-                permanent_path,
-                filename
-            )
-        )
+        print(f"\n[INVOICE UPLOAD LOG] File: {filename} | Method: {extraction_method}", flush=True)
+        print(f"[INVOICE UPLOAD LOG] Raw Text: {extracted.get('raw_text', '')[:500]}", flush=True)
+        print(f"[INVOICE UPLOAD LOG] Parsed Fields: {extracted}\n", flush=True)
 
-        # ========================================================
-        # 5. OCR REVIEW CHECK
-        # ========================================================
-
-        if (
-            extracted.get("requires_review")
-            or extracted.get("needs_manual_review")
-            or extraction_method == "failed"
-        ):
-
-            extracted["requires_review"] = True
-            extracted["needs_manual_review"] = True
-
-            return jsonify({
-                "message": (
-                    "Invoice uploaded, but OCR requires "
-                    "manual verification."
-                ),
-                "requires_review": True,
-                "needs_manual_review": True,
-                "extracted_data": extracted,
-                "file_name": unique_filename,
-                "file_url": f"/api/uploads/{unique_filename}",
-                "extraction_method": extraction_method
-            }), 422
-
-        # ========================================================
-        # 6. GET EXACT OCR VALUES
-        # ========================================================
-
-        vendor = extracted.get("vendor")
-        invoice_number = extracted.get(
-            "invoice_number"
-        )
-        amount = extracted.get("subtotal")
-        tax = extracted.get("tax")
-        total_amount = extracted.get(
-            "total_amount"
-        )
-        due_date = extracted.get(
-            "due_date"
-        )
-
-        # ========================================================
-        # 7. REQUIRED FIELD CHECK
-        # ========================================================
-
-        missing_fields = []
-
-        if not vendor:
-            missing_fields.append("vendor")
-
-        if not invoice_number:
-            missing_fields.append("invoice_number")
-
-        if amount is None:
-            missing_fields.append("subtotal")
-
-        if total_amount is None:
-            missing_fields.append("total_amount")
-
-        if missing_fields:
-
-            extracted["requires_review"] = True
-            extracted["needs_manual_review"] = True
-
-            extracted["manual_review_reason"] = (
-                "Missing required fields: "
-                + ", ".join(missing_fields)
-            )
-
-            return jsonify({
-                "message": (
-                    "OCR could not extract all required "
-                    "invoice fields."
-                ),
-                "requires_review": True,
-                "needs_manual_review": True,
-                "extracted_data": extracted,
-                "file_name": unique_filename,
-                "file_url": f"/api/uploads/{unique_filename}",
-                "extraction_method": extraction_method
-            }), 422
-
-        # ========================================================
-        # 8. DO NOT GENERATE OR CALCULATE VALUES
-        # ========================================================
+        return jsonify({
+            "message": "Invoice document uploaded and OCR data extracted successfully",
+            "requires_review": extracted.get("requires_review", False),
+            "needs_manual_review": extracted.get("needs_manual_review", False),
+            "extracted_data": extracted,
+            "file_name": unique_filename,
+            "file_url": f"/api/uploads/{unique_filename}",
+            "extraction_method": extraction_method
+        }), 200
 
         client_name = vendor
 

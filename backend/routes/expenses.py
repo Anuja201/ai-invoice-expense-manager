@@ -86,6 +86,7 @@ def create_expense():
     description = data.get("description", "")
     receipt_date = data.get("receipt_date")
     payment_method = data.get("payment_method", "other")
+    receipt_file = data.get("receipt_file") or data.get("file_name") or None
 
     if not title or amount <= 0:
         return jsonify({"error": "Title and valid amount are required"}), 400
@@ -110,12 +111,12 @@ def create_expense():
             cursor.execute("""
                 INSERT INTO expenses
                 (user_id, title, amount, category_id, ai_category, ai_confidence,
-                 description, vendor, receipt_date, payment_method)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 description, vendor, receipt_date, payment_method, receipt_file)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 user_id, title, amount, category_id,
                 ai_result["category"], ai_result["confidence"],
-                description, vendor, receipt_date, payment_method
+                description, vendor, receipt_date, payment_method, receipt_file
             ))
             conn.commit()
             new_id = cursor.lastrowid
@@ -177,7 +178,7 @@ def update_expense(expense_id):
             if not existing:
                 return jsonify({"error": "Expense not found"}), 404
 
-            allowed = ["title", "amount", "vendor", "description", "receipt_date", "payment_method", "status"]
+            allowed = ["title", "amount", "vendor", "description", "receipt_date", "payment_method", "status", "receipt_file"]
             updates = {k: v for k, v in data.items() if k in allowed}
 
             # Re-run AI if title/vendor changed
@@ -246,3 +247,117 @@ def delete_expense(expense_id):
         return jsonify({"message": "Expense deleted"}), 200
     finally:
         conn.close()
+
+
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "tiff", "bmp", "webp"}
+
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@expenses_bp.route("/upload", methods=["POST"])
+@jwt_required()
+def upload_expense():
+    """
+    Upload receipt image or PDF, store the file, run OCR,
+    and return structured OCR data for user review and editing before saving.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file part. Use field name 'file'"}), 400
+
+    file = request.files["file"]
+    if not file.filename:
+        return jsonify({"error": "No file selected"}), 400
+
+    if not allowed_file(file.filename):
+        return jsonify({
+            "error": "Invalid file type. Allowed: PDF, PNG, JPG, JPEG, TIFF, BMP, WEBP"
+        }), 400
+
+    from werkzeug.utils import secure_filename
+    from datetime import datetime
+
+    filename = secure_filename(file.filename)
+    unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{filename}"
+    permanent_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+
+    try:
+        file.save(permanent_path)
+    except Exception as e:
+        return jsonify({"error": "Could not save uploaded file", "details": str(e)}), 500
+
+    try:
+        from routes.ocr import extract_invoice_data_from_file
+        extracted, extraction_method = extract_invoice_data_from_file(permanent_path, filename)
+
+        # Prepare expense OCR fields (preserve None if undetected)
+        vendor = extracted.get("vendor") or None
+        amount = extracted.get("total_amount") if extracted.get("total_amount") is not None else extracted.get("subtotal")
+        receipt_date = extracted.get("date") or extracted.get("due_date") or None
+
+        # Format title & description
+        title = f"Expense - {vendor}" if vendor else ""
+        raw_ocr_text = extracted.get("raw_text", "")
+
+        desc_parts = []
+        if vendor:
+            desc_parts.append(f"Vendor: {vendor}")
+        if extracted.get("line_items"):
+            items_str = ", ".join([f"{item.get('description', '')}" for item in extracted["line_items"] if item.get('description')])
+            if items_str:
+                desc_parts.append(f"Items: {items_str}")
+        description = " | ".join(desc_parts) if desc_parts else ""
+
+        # AI category
+        ai_category = extracted.get("ai_category") or "Uncategorized"
+        ai_confidence = extracted.get("ai_confidence", 0)
+
+        missing_expense_fields = []
+        if not vendor:
+            missing_expense_fields.append("vendor name")
+        if amount is None:
+            missing_expense_fields.append("amount")
+        if not receipt_date:
+            missing_expense_fields.append("receipt date")
+
+        requires_review = extracted.get("requires_review", False) or len(missing_expense_fields) > 0
+        review_reason = extracted.get("manual_review_reason") or (f"Could not detect: {', '.join(missing_expense_fields)}" if missing_expense_fields else None)
+
+        extracted_expense = {
+            "title": title,
+            "vendor": vendor,
+            "amount": float(amount) if amount is not None else None,
+            "receipt_date": receipt_date,
+            "payment_method": "upi",
+            "description": description,
+            "raw_text": raw_ocr_text,
+            "ai_category": ai_category,
+            "ai_confidence": int(ai_confidence) if ai_confidence else 0,
+            "file_name": unique_filename,
+            "file_url": f"/api/uploads/receipts/{unique_filename}",
+            "needs_manual_review": requires_review,
+            "requires_review": requires_review,
+            "manual_review_reason": review_reason
+        }
+
+        print(f"\n[EXPENSE UPLOAD LOG] File: {filename} | Method: {extraction_method}", flush=True)
+        print(f"[EXPENSE UPLOAD LOG] Raw Text: {raw_ocr_text[:500]}", flush=True)
+        print(f"[EXPENSE UPLOAD LOG] Parsed Fields: {extracted_expense}\n", flush=True)
+
+        return jsonify({
+            "message": "Receipt uploaded and extracted successfully",
+            "extracted_data": extracted_expense,
+            "extraction_method": extraction_method,
+            "file_name": unique_filename,
+            "file_url": f"/api/uploads/receipts/{unique_filename}"
+        }), 200
+
+    except Exception as e:
+        if os.path.exists(permanent_path):
+            try:
+                os.remove(permanent_path)
+            except Exception:
+                pass
+        return jsonify({"error": "OCR extraction failed", "details": str(e)}), 500
+

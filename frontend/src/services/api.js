@@ -74,6 +74,13 @@ export const expenseService = {
   get: (id) => api.get(`/expenses/${id}`),
   update: (id, data) => api.put(`/expenses/${id}`, data),
   delete: (id) => api.delete(`/expenses/${id}`),
+  upload: (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post('/expenses/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  },
 };
 
 // Categories

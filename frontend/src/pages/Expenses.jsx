@@ -1,6 +1,6 @@
 /**
  * pages/Expenses.jsx
- * Expense management: list, add, edit, delete with AI categorization
+ * Expense management: list, add, edit, upload receipt/PDF with OCR & editable fields, delete
  */
 
 import { useState, useEffect } from 'react';
@@ -21,12 +21,21 @@ export default function Expenses() {
   const [expenses, setExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+
+  // Manual create/edit modal
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [aiResult, setAiResult] = useState(null);
   const [error, setError] = useState('');
   const [form, setForm] = useState(emptyForm);
+
+  // OCR Upload modal state
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
+  const [ocrError, setOcrError] = useState('');
+  const [ocrForm, setOcrForm] = useState(null);
 
   const fetchExpenses = async () => {
     try {
@@ -90,7 +99,6 @@ export default function Expenses() {
         setExpenses(exps => [res.data.expense, ...exps]);
       }
       if (!editingId) {
-        // Show AI result briefly then close
         setTimeout(() => { setShowModal(false); setForm(emptyForm); }, 1500);
       } else {
         setShowModal(false);
@@ -102,7 +110,6 @@ export default function Expenses() {
     }
   };
 
-
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this expense?')) return;
     try {
@@ -110,6 +117,95 @@ export default function Expenses() {
       setExpenses(exps => exps.filter(e => e.id !== id));
     } catch (err) {
       alert('Delete failed');
+    }
+  };
+
+  // OCR Upload handlers
+  const handleRealUpload = async (file) => {
+    if (!file) return;
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    const allowed = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp', 'webp'];
+    if (!allowed.includes(ext)) {
+      setOcrError(`Invalid file type '.${ext}'. Allowed types: ${allowed.join(', ')}`);
+      return;
+    }
+
+    const maxSize = 16 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setOcrError('File exceeds maximum limit of 16MB.');
+      return;
+    }
+
+    setUploadLoading(true);
+    setOcrError('');
+    setUploadResult(null);
+    setOcrForm(null);
+
+    try {
+      const res = await expenseService.upload(file);
+      const data = res.data.extracted_data;
+
+      setUploadResult({
+        extraction_method: res.data.extraction_method || 'AI OCR',
+        file_name: res.data.file_name,
+        file_url: res.data.file_url,
+        needs_manual_review: data?.needs_manual_review || false,
+        manual_review_reason: data?.manual_review_reason || null,
+      });
+
+      setOcrForm({
+        title: data?.title || '',
+        vendor: data?.vendor || '',
+        amount: data?.amount !== undefined && data?.amount !== null ? data.amount : '',
+        receipt_date: data?.receipt_date || new Date().toISOString().split('T')[0],
+        payment_method: data?.payment_method || 'upi',
+        description: data?.description || '',
+        ai_category: data?.ai_category || 'Uncategorized',
+        ai_confidence: data?.ai_confidence || 80,
+        receipt_file: data?.file_name || ''
+      });
+    } catch (err) {
+      const resp = err.response?.data;
+      setOcrError(resp?.error || 'OCR extraction failed. Please try manual entry or try another file.');
+    } finally {
+      setUploadLoading(false);
+    }
+  };
+
+  const handleSaveOcrExpense = async (e) => {
+    e.preventDefault();
+    if (!ocrForm) return;
+    setOcrError('');
+
+    const amountNum = parseFloat(ocrForm.amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      setOcrError('Amount must be a positive number');
+      return;
+    }
+    if (!ocrForm.title.trim()) {
+      setOcrError('Title is required');
+      return;
+    }
+    if (!ocrForm.receipt_date) {
+      setOcrError('Receipt date is required');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await expenseService.create({
+        ...ocrForm,
+        amount: amountNum
+      });
+      setShowUploadModal(false);
+      setUploadResult(null);
+      setOcrForm(null);
+      await fetchExpenses();
+    } catch (err) {
+      setOcrError(err.response?.data?.error || 'Failed to save expense');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -121,9 +217,16 @@ export default function Expenses() {
       <div className="page-header">
         <div className="page-header-left">
           <h1>Expenses</h1>
-          <p>Track spending with AI auto-categorization</p>
+          <p>Track spending with AI auto-categorization & OCR receipt upload</p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ Add Expense</button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn btn-secondary" onClick={() => { setShowUploadModal(true); setUploadResult(null); setOcrForm(null); setOcrError(''); }}>
+            📄 Upload Receipt
+          </button>
+          <button className="btn btn-primary" onClick={openCreate}>
+            + Add Expense
+          </button>
+        </div>
       </div>
 
       {/* Summary Strip */}
@@ -165,7 +268,7 @@ export default function Expenses() {
             <div className="empty-state">
               <div className="empty-state-icon">💳</div>
               <h3>No expenses yet</h3>
-              <p>Start tracking your spending</p>
+              <p>Start tracking your spending or upload a receipt PDF/image</p>
             </div>
           ) : (
             <table className="data-table">
@@ -227,7 +330,7 @@ export default function Expenses() {
         </div>
       </div>
 
-      {/* Add/Edit Modal */}
+      {/* Manual Create/Edit Modal */}
       {showModal && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowModal(false)}>
           <div className="modal">
@@ -293,6 +396,126 @@ export default function Expenses() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* OCR Receipt Upload Modal */}
+      {showUploadModal && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowUploadModal(false)}>
+          <div className="modal">
+            <div className="modal-header">
+              <div>
+                <div className="modal-title">Upload Expense Receipt / PDF</div>
+                <div className="modal-subtitle">AI will extract details — review & edit fields before saving</div>
+              </div>
+              <button className="modal-close" onClick={() => { setShowUploadModal(false); setUploadResult(null); setOcrForm(null); setOcrError(''); }}>✕</button>
+            </div>
+
+            <div className="modal-body">
+              {ocrError && <div className="error-message" style={{ marginBottom: 14 }}>{ocrError}</div>}
+
+              {!ocrForm && !uploadLoading && (
+                <div
+                  className="upload-zone"
+                  onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('dragover'); }}
+                  onDragLeave={e => e.currentTarget.classList.remove('dragover')}
+                  onDrop={e => {
+                    e.preventDefault();
+                    e.currentTarget.classList.remove('dragover');
+                    const file = e.dataTransfer.files[0];
+                    if (file) handleRealUpload(file);
+                  }}
+                  onClick={() => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = '.pdf,.png,.jpg,.jpeg,.tiff,.bmp,.webp';
+                    input.onchange = e => handleRealUpload(e.target.files[0]);
+                    input.click();
+                  }}
+                >
+                  <div className="upload-zone-icon">📄</div>
+                  <div className="upload-zone-title">Drop Receipt Image or PDF Here</div>
+                  <div className="upload-zone-sub">Supports PDF, PNG, JPG, JPEG, TIFF, BMP, WEBP — AI will extract fields</div>
+                </div>
+              )}
+
+              {uploadLoading && (
+                <div style={{ textAlign: 'center', padding: 28 }}>
+                  <div style={{ width:28, height:28, border:'3px solid var(--border)', borderTopColor:'var(--primary)', borderRadius:'50%', animation:'spin 0.7s linear infinite', margin:'0 auto 12px' }} />
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>AI reading receipt & extracting fields...</p>
+                </div>
+              )}
+
+              {ocrForm && !uploadLoading && (
+                <form onSubmit={handleSaveOcrExpense} className="modal-form" style={{ marginTop: 4 }}>
+                  <div style={{ background: 'var(--success-light)', border: '1px solid #A7F3D0', borderRadius: 'var(--radius-sm)', padding: 12, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--success)', marginBottom: 2 }}>
+                      ✅ Receipt Extracted ({uploadResult?.extraction_method || 'AI OCR'})
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      Please review and edit any extracted OCR fields below before saving.
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Title *</label>
+                      <input className="form-input" name="title" value={ocrForm.title} onChange={e => setOcrForm(f => ({ ...f, title: e.target.value }))} required />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Amount (₹) *</label>
+                      <input className="form-input" type="number" name="amount" value={ocrForm.amount} onChange={e => setOcrForm(f => ({ ...f, amount: e.target.value }))} min="0.01" step="0.01" required />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Vendor</label>
+                      <input className="form-input" name="vendor" value={ocrForm.vendor} onChange={e => setOcrForm(f => ({ ...f, vendor: e.target.value }))} placeholder="Amazon, Starbucks..." />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Receipt Date *</label>
+                      <input className="form-input" type="date" name="receipt_date" value={ocrForm.receipt_date} onChange={e => setOcrForm(f => ({ ...f, receipt_date: e.target.value }))} required />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">Payment Method</label>
+                      <select className="form-select" name="payment_method" value={ocrForm.payment_method} onChange={e => setOcrForm(f => ({ ...f, payment_method: e.target.value }))}>
+                        {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m.replace('_', ' ')}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">AI Category</label>
+                      <div style={{ paddingTop: 6 }}>
+                        <span className="category-pill" style={{ background: '#4F46E518', color: '#4F46E5', fontSize: 13 }}>
+                          🤖 {ocrForm.ai_category} ({ocrForm.ai_confidence}% confidence)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Description / Extracted Notes</label>
+                    <textarea className="form-textarea" name="description" value={ocrForm.description} onChange={e => setOcrForm(f => ({ ...f, description: e.target.value }))} />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 10, justifyContent: 'space-between', alignItems: 'center', marginTop: 20 }}>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setOcrForm(null); setUploadResult(null); setOcrError(''); }}>
+                      🔄 Re-scan / Select File
+                    </button>
+                    <div style={{ display: 'flex', gap: 10 }}>
+                      <button type="button" className="btn btn-secondary" onClick={() => setShowUploadModal(false)}>Cancel</button>
+                      <button type="submit" className="btn btn-primary" disabled={submitting}>
+                        {submitting ? <span className="spinner" /> : '💾 Save Expense'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              )}
+            </div>
           </div>
         </div>
       )}
