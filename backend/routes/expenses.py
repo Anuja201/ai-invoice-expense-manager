@@ -197,18 +197,27 @@ def update_expense(expense_id):
                 updates["category_id"] = cat["id"] if cat else None
 
             if updates:
+                if "amount" in updates:
+                    try:
+                        amt_val = float(updates["amount"])
+                        if amt_val <= 0:
+                            return jsonify({"error": "Amount must be greater than zero"}), 400
+                        updates["amount"] = amt_val
+                    except (ValueError, TypeError):
+                        return jsonify({"error": "Invalid amount"}), 400
+
                 set_clause = ", ".join(f"{k} = %s" for k in updates)
                 cursor.execute(
-                    f"UPDATE expenses SET {set_clause} WHERE id = %s",
-                    (*updates.values(), expense_id)
+                    f"UPDATE expenses SET {set_clause} WHERE id = %s AND user_id = %s",
+                    (*updates.values(), expense_id, user_id)
                 )
                 conn.commit()
 
             cursor.execute("""
                 SELECT e.*, c.name as category_name, c.color as category_color
                 FROM expenses e LEFT JOIN categories c ON e.category_id = c.id
-                WHERE e.id = %s
-            """, (expense_id,))
+                WHERE e.id = %s AND e.user_id = %s
+            """, (expense_id, user_id))
             expense = cursor.fetchone()
 
         return jsonify({"message": "Expense updated", "expense": serialize_expense(expense)}), 200
@@ -231,7 +240,7 @@ def delete_expense(expense_id):
             if not cursor.fetchone():
                 return jsonify({"error": "Expense not found"}), 404
 
-            cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
+            cursor.execute("DELETE FROM expenses WHERE id = %s AND user_id = %s", (expense_id, user_id))
             conn.commit()
 
         return jsonify({"message": "Expense deleted"}), 200

@@ -8,6 +8,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from utils.db import get_db
 from utils.ai_categorizer import categorize
+from config import Config
 import random
 import string
 from datetime import datetime
@@ -17,11 +18,15 @@ import tempfile
 
 invoices_bp = Blueprint("invoices", __name__)
 
-UPLOAD_FOLDER = "uploads"
-ALLOWED_EXTENSIONS = {"pdf"}
+UPLOAD_FOLDER = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    Config.UPLOAD_FOLDER
+)
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ALLOWED_EXTENSIONS = Config.ALLOWED_EXTENSIONS
 
 # Ensure upload folder exists
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 def allowed_file(filename):
@@ -33,7 +38,6 @@ def generate_invoice_number():
     year = datetime.now().year
     suffix = "".join(random.choices(string.digits, k=4))
     return f"INV-{year}-{suffix}"
-
 
 
 def serialize_invoice(inv):
@@ -120,7 +124,7 @@ def create_invoice():
             cursor.execute("""
                 INSERT INTO invoices
                 (user_id, invoice_number, client_name, client_email, amount, tax, total_amount,
-                 status, category_id, description, due_date, ai_category, ai_confidence)
+                status, category_id, description, due_date, ai_category, ai_confidence)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 user_id, invoice_number, client_name,
@@ -170,7 +174,7 @@ def get_invoice(invoice_id):
 @jwt_required()
 def update_invoice(invoice_id):
     user_id = get_jwt_identity()
-    data = request.get_json()
+    data = request.get_json() or {}
 
     conn = get_db()
     try:
@@ -185,8 +189,20 @@ def update_invoice(invoice_id):
             allowed = ["client_name", "client_email", "amount", "tax", "status", "description", "due_date"]
             updates = {k: v for k, v in data.items() if k in allowed}
 
+            if "status" in updates and updates["status"] not in ['draft', 'sent', 'paid', 'overdue', 'cancelled']:
+                return jsonify({"error": "Invalid status value"}), 400
+
+            if "amount" in updates:
+                try:
+                    amt_val = float(updates["amount"])
+                    if amt_val <= 0:
+                        return jsonify({"error": "Amount must be greater than zero"}), 400
+                    updates["amount"] = amt_val
+                except (ValueError, TypeError):
+                    return jsonify({"error": "Invalid amount value"}), 400
+
             if "amount" in updates or "tax" in updates:
-                cursor.execute("SELECT amount, tax FROM invoices WHERE id=%s", (invoice_id,))
+                cursor.execute("SELECT amount, tax FROM invoices WHERE id=%s AND user_id=%s", (invoice_id, user_id))
                 current = cursor.fetchone()
                 amt = float(updates.get("amount", current["amount"]))
                 tax = float(updates.get("tax", current["tax"]))
@@ -195,16 +211,16 @@ def update_invoice(invoice_id):
             if updates:
                 set_clause = ", ".join(f"{k} = %s" for k in updates)
                 cursor.execute(
-                    f"UPDATE invoices SET {set_clause} WHERE id=%s",
-                    (*updates.values(), invoice_id)
+                    f"UPDATE invoices SET {set_clause} WHERE id=%s AND user_id=%s",
+                    (*updates.values(), invoice_id, user_id)
                 )
                 conn.commit()
 
             cursor.execute("""
                 SELECT i.*, c.name as category_name, c.color as category_color
                 FROM invoices i LEFT JOIN categories c ON i.category_id = c.id
-                WHERE i.id=%s
-            """, (invoice_id,))
+                WHERE i.id=%s AND i.user_id=%s
+            """, (invoice_id, user_id))
             invoice = cursor.fetchone()
 
         return jsonify({"message": "Invoice updated", "invoice": serialize_invoice(invoice)}), 200
@@ -226,7 +242,7 @@ def delete_invoice(invoice_id):
             if not cursor.fetchone():
                 return jsonify({"error": "Invoice not found"}), 404
 
-            cursor.execute("DELETE FROM invoices WHERE id=%s", (invoice_id,))
+            cursor.execute("DELETE FROM invoices WHERE id=%s AND user_id=%s", (invoice_id, user_id))
             conn.commit()
 
         return jsonify({"message": "Invoice deleted"}), 200
@@ -234,120 +250,393 @@ def delete_invoice(invoice_id):
         conn.close()
 
 
-# ────────────────── Upload + OCR + Create Endpoint ────────────── #
-
 @invoices_bp.route("/upload", methods=["POST"])
 @jwt_required()
 def upload_invoice():
     """
-    Accept a PDF invoice upload, run the OCR pipeline to extract
-    structured fields, then persist the invoice to the database.
-
-    Returns:
-        { "message": "...", "invoice_number": "...", "amount": ... }
+    Upload invoice image/PDF, permanently store the file,
+    run OCR, and save only verified OCR data.
     """
+
     user_id = get_jwt_identity()
 
-    # ── Validate uploaded file ────────────────────────────────────
+    # ============================================================
+    # 1. CHECK FILE
+    # ============================================================
+
     if "file" not in request.files:
-        return jsonify({"error": "No file part. Use field name 'file'"}), 400
+        return jsonify({
+            "error": "No file part. Use field name 'file'"
+        }), 400
 
     file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
+
+    if not file.filename:
+        return jsonify({
+            "error": "No file selected"
+        }), 400
 
     if not allowed_file(file.filename):
-        return jsonify({"error": "Invalid file type. Only PDF allowed."}), 400
+        return jsonify({
+            "error": "Invalid file type. Allowed: PDF, PNG, JPG, JPEG, TIFF, BMP, WEBP"
+        }), 400
 
     filename = secure_filename(file.filename)
+
     ext = filename.rsplit(".", 1)[1].lower()
 
-    # ── Save to a temp file so OCR can read it ────────────────────
-    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
-        file.save(tmp.name)
-        tmp_path = tmp.name
+    # ============================================================
+    # 2. CREATE UNIQUE PERMANENT FILE NAME
+    # ============================================================
+
+    unique_filename = (
+        f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_"
+        f"{filename}"
+    )
+
+    permanent_path = os.path.join(
+        UPLOAD_FOLDER,
+        unique_filename
+    )
+
+    # ============================================================
+    # 3. SAVE UPLOADED FILE PERMANENTLY
+    # ============================================================
 
     try:
-        # ── Run OCR pipeline (imported from ocr.py) ───────────────
-        from routes.ocr import extract_invoice_data_from_file
-        extracted, extraction_method = extract_invoice_data_from_file(tmp_path, filename)
 
+        file.save(permanent_path)
 
-        # ── Map OCR output to invoice fields ──────────────────────
-        client_name = extracted.get("vendor") or "Unknown Vendor"
-        amount = float(extracted.get("subtotal") or extracted.get("total_amount") or 0)
-        tax = float(extracted.get("tax") or 0)
-        total_amount = float(extracted.get("total_amount") or (amount + tax))
-        description = f"Uploaded PDF: {filename}"
+    except Exception as e:
 
-        # Use OCR-extracted invoice number, fall back to generated one
-        invoice_number = extracted.get("invoice_number") or generate_invoice_number()
+        return jsonify({
+            "error": "Could not save uploaded file",
+            "details": str(e)
+        }), 500
 
-        # AI categorisation (already done inside OCR pipeline, reuse result)
-        ai_category = extracted.get("ai_category")
-        ai_confidence = extracted.get("ai_confidence")
+    try:
 
-        # If OCR did not run AI categorisation, do it now
+        # ========================================================
+        # 4. RUN OCR
+        # ========================================================
+
+        from routes.ocr import (
+            extract_invoice_data_from_file
+        )
+
+        extracted, extraction_method = (
+            extract_invoice_data_from_file(
+                permanent_path,
+                filename
+            )
+        )
+
+        # ========================================================
+        # 5. OCR REVIEW CHECK
+        # ========================================================
+
+        if (
+            extracted.get("requires_review")
+            or extracted.get("needs_manual_review")
+            or extraction_method == "failed"
+        ):
+
+            extracted["requires_review"] = True
+            extracted["needs_manual_review"] = True
+
+            return jsonify({
+                "message": (
+                    "Invoice uploaded, but OCR requires "
+                    "manual verification."
+                ),
+                "requires_review": True,
+                "needs_manual_review": True,
+                "extracted_data": extracted,
+                "file_name": unique_filename,
+                "file_url": f"/api/uploads/{unique_filename}",
+                "extraction_method": extraction_method
+            }), 422
+
+        # ========================================================
+        # 6. GET EXACT OCR VALUES
+        # ========================================================
+
+        vendor = extracted.get("vendor")
+        invoice_number = extracted.get(
+            "invoice_number"
+        )
+        amount = extracted.get("subtotal")
+        tax = extracted.get("tax")
+        total_amount = extracted.get(
+            "total_amount"
+        )
+        due_date = extracted.get(
+            "due_date"
+        )
+
+        # ========================================================
+        # 7. REQUIRED FIELD CHECK
+        # ========================================================
+
+        missing_fields = []
+
+        if not vendor:
+            missing_fields.append("vendor")
+
+        if not invoice_number:
+            missing_fields.append("invoice_number")
+
+        if amount is None:
+            missing_fields.append("subtotal")
+
+        if total_amount is None:
+            missing_fields.append("total_amount")
+
+        if missing_fields:
+
+            extracted["requires_review"] = True
+            extracted["needs_manual_review"] = True
+
+            extracted["manual_review_reason"] = (
+                "Missing required fields: "
+                + ", ".join(missing_fields)
+            )
+
+            return jsonify({
+                "message": (
+                    "OCR could not extract all required "
+                    "invoice fields."
+                ),
+                "requires_review": True,
+                "needs_manual_review": True,
+                "extracted_data": extracted,
+                "file_name": unique_filename,
+                "file_url": f"/api/uploads/{unique_filename}",
+                "extraction_method": extraction_method
+            }), 422
+
+        # ========================================================
+        # 8. DO NOT GENERATE OR CALCULATE VALUES
+        # ========================================================
+
+        client_name = vendor
+
+        description = (
+            f"Uploaded invoice: {filename}"
+        )
+
+        # ========================================================
+        # 9. AI CATEGORY
+        # ========================================================
+
+        ai_category = extracted.get(
+            "ai_category"
+        )
+
+        ai_confidence = extracted.get(
+            "ai_confidence"
+        )
+
         if not ai_category:
-            ai_result = categorize(f"{description} {client_name}")
-            ai_category = ai_result["category"]
-            ai_confidence = ai_result["confidence"]
 
-        # ── Persist to database ───────────────────────────────────
+            ai_result = categorize(
+                f"{description} {client_name}"
+            )
+
+            ai_category = ai_result[
+                "category"
+            ]
+
+            ai_confidence = ai_result[
+                "confidence"
+            ]
+
+        # ========================================================
+        # 10. DATABASE
+        # ========================================================
+
         conn = get_db()
-        try:
-            with conn.cursor() as cursor:
-                # Resolve category_id from category name
-                cursor.execute(
-                    "SELECT id FROM categories WHERE name = %s LIMIT 1",
-                    (ai_category,)
-                )
-                cat = cursor.fetchone()
-                category_id = cat["id"] if cat else None
 
-                # Ensure invoice_number uniqueness (retry with generated if needed)
+        try:
+
+            with conn.cursor() as cursor:
+
+                # ----------------------------------------------
+                # Duplicate invoice number
+                # ----------------------------------------------
+
                 cursor.execute(
-                    "SELECT id FROM invoices WHERE invoice_number = %s LIMIT 1",
+                    """
+                    SELECT id
+                    FROM invoices
+                    WHERE invoice_number = %s
+                    LIMIT 1
+                    """,
                     (invoice_number,)
                 )
-                if cursor.fetchone():
-                    invoice_number = generate_invoice_number()
 
-                cursor.execute("""
+                if cursor.fetchone():
+
+                    extracted[
+                        "requires_review"
+                    ] = True
+
+                    extracted[
+                        "needs_manual_review"
+                    ] = True
+
+                    extracted[
+                        "manual_review_reason"
+                    ] = (
+                        f"Invoice number "
+                        f"'{invoice_number}' "
+                        f"already exists."
+                    )
+
+                    return jsonify({
+                        "message": (
+                            "Duplicate invoice number. "
+                            "Manual review required."
+                        ),
+                        "requires_review": True,
+                        "needs_manual_review": True,
+                        "extracted_data": extracted,
+                        "file_name": unique_filename,
+                        "file_url": f"/api/uploads/{unique_filename}",
+                        "extraction_method": extraction_method
+                    }), 422
+
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM categories
+                    WHERE name = %s
+                    LIMIT 1
+                    """,
+                    (ai_category,)
+                )
+
+                category = cursor.fetchone()
+
+                category_id = (
+                    category["id"]
+                    if category
+                    else None
+                )
+
+                # ----------------------------------------------
+                # INSERT
+                # ----------------------------------------------
+
+                cursor.execute(
+                    """
                     INSERT INTO invoices
-                    (user_id, invoice_number, client_name, client_email, amount, tax,
-                     total_amount, status, category_id, description, due_date, file_name,
-                     ai_category, ai_confidence)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    user_id, invoice_number, client_name, "",
-                    amount, tax, total_amount,
-                    "draft", category_id, description, due_date, filename,
-                    ai_category, ai_confidence
-                ))
+                    (
+                        user_id,
+                        invoice_number,
+                        client_name,
+                        client_email,
+                        amount,
+                        tax,
+                        total_amount,
+                        status,
+                        category_id,
+                        description,
+                        due_date,
+                        file_name,
+                        ai_category,
+                        ai_confidence
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s
+                    )
+                    """,
+                    (
+                        user_id,
+                        invoice_number,
+                        client_name,
+                        "",
+                        amount,
+                        tax,
+                        total_amount,
+                        "draft",
+                        category_id,
+                        description,
+                        due_date,
+                        unique_filename,
+                        ai_category,
+                        ai_confidence
+                    )
+                )
+
                 conn.commit()
+
                 new_id = cursor.lastrowid
 
-                cursor.execute("""
-                    SELECT i.*, c.name as category_name, c.color as category_color
-                    FROM invoices i LEFT JOIN categories c ON i.category_id = c.id
+                # ----------------------------------------------
+                # Fetch saved invoice
+                # ----------------------------------------------
+
+                cursor.execute(
+                    """
+                    SELECT
+                        i.*,
+                        c.name AS category_name,
+                        c.color AS category_color
+                    FROM invoices i
+                    LEFT JOIN categories c
+                        ON i.category_id = c.id
                     WHERE i.id = %s
-                """, (new_id,))
+                    AND i.user_id = %s
+                    """,
+                    (
+                        new_id,
+                        user_id
+                    )
+                )
+
                 invoice = cursor.fetchone()
 
         finally:
+
             conn.close()
 
-    finally:
-        # Clean up temp file
+        # ========================================================
+        # 11. RETURN
+        # ========================================================
+
+        return jsonify({
+            "message": (
+                "Invoice uploaded and processed successfully"
+            ),
+            "invoice": serialize_invoice(
+                invoice
+            ),
+            "extracted_data": extracted,
+            "requires_review": False,
+            "needs_manual_review": False,
+            "file_name": unique_filename,
+            "file_url": f"/api/uploads/{unique_filename}",
+            "extraction_method": extraction_method
+        }), 201
+
+    except Exception as e:
+
+        # If processing fails, remove the permanent file
+        # so broken uploads are not left behind.
+
         try:
-            os.unlink(tmp_path)
+            if os.path.exists(
+                permanent_path
+            ):
+                os.remove(
+                    permanent_path
+                )
         except Exception:
             pass
 
-    return jsonify({
-        "message": "Invoice uploaded successfully",
-        "invoice_number": invoice_number,
-        "amount": total_amount,
-        "invoice": serialize_invoice(invoice),
-    }), 201
+        return jsonify({
+            "error": "Invoice processing failed",
+            "details": str(e)
+        }), 500

@@ -70,9 +70,16 @@ export default function Expenses() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+
+    const amountNum = parseFloat(form.amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      setError('Expense amount must be a positive number');
+      return;
+    }
+
     setSubmitting(true);
     try {
-      const payload = { ...form, amount: parseFloat(form.amount) };
+      const payload = { ...form, amount: amountNum };
       let res;
       if (editingId) {
         res = await expenseService.update(editingId, payload);
@@ -94,6 +101,7 @@ export default function Expenses() {
       setSubmitting(false);
     }
   };
+
 
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this expense?')) return;

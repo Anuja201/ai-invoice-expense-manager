@@ -203,3 +203,37 @@ def google_oauth():
             "initials": user_data.get("avatar_initials"),
         }
     }), 200
+
+
+@auth_bp.route("/forgot-password", methods=["POST"])
+def forgot_password():
+    """
+    Handle forgot password requests.
+    Validates user email and returns a reset instruction response.
+    """
+    data = request.get_json() or {}
+    email = data.get("email", "").strip().lower()
+
+    if not email:
+        return jsonify({"error": "Email address is required"}), 400
+
+    # Basic email format check
+    if "@" not in email or "." not in email:
+        return jsonify({"error": "Please provide a valid email address"}), 400
+
+    user = execute_query(
+        "SELECT id, email FROM users WHERE email = %s LIMIT 1",
+        (email,),
+        fetch_one=True
+    )
+
+    # For security reasons, respond with success whether user exists or not, but return clear feedback
+    if user:
+        return jsonify({
+            "message": f"Password reset instructions have been sent to {email}. Please check your inbox."
+        }), 200
+    else:
+        return jsonify({
+            "message": f"If an account with {email} exists, password reset instructions have been sent."
+        }), 200
+

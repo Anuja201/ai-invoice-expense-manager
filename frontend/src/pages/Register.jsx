@@ -1,7 +1,3 @@
-/**
- * pages/Register.jsx
- * New user registration form
- */
 
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -9,81 +5,95 @@ import { useAuth } from '../context/AuthContext';
 import '../styles/Auth.css';
 
 export default function Register() {
-  const [form, setForm] = useState({ name: '', email: '', password: '', company: '' });
+  const [form, setForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+    company: '',
+  });
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
   const { register } = useAuth();
   const navigate = useNavigate();
 
-  const handleChange = (e) => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
+  const handleChange = (e) => {
+    setForm({
+      ...form,
+      [e.target.name]: e.target.value,
+    });
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
     setError('');
+
     if (form.password.length < 6) {
       setError('Password must be at least 6 characters.');
       return;
     }
+
     setLoading(true);
+
     try {
       await register(form);
       navigate('/dashboard');
     } catch (err) {
-      setError(err.response?.data?.error || 'Registration failed. Please try again.');
+      setError(
+        err.response?.data?.error ||
+        'Registration failed. Please try again.'
+      );
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="auth-wrapper">
-      {/* Left panel */}
-      <div className="auth-left">
-        <div className="auth-left-content">
-          <div className="auth-brand">
-            <div className="auth-brand-icon">IM</div>
-            <span className="auth-brand-name">InvoiceAI</span>
+    <div className="login-page">
+
+      {/* =====================================================
+          LEFT SIDE - REGISTER FORM
+          ===================================================== */}
+
+      <div className="login-left">
+
+        <div className="login-form-container">
+
+          {/* Logo */}
+          <div className="login-logo">
+
+            <h1>Expenza</h1>
+
+            <p>
+              AI Invoice & Expense Manager for Businesses
+            </p>
+
           </div>
 
-          <h1 className="auth-headline">
-            Join Thousands of<br />
-            <span>Finance Teams</span>
-          </h1>
 
-          <p className="auth-sub">
-            Get started for free. No credit card required. Set up in under 2 minutes.
-          </p>
+          {/* Error Message */}
+          {error && (
+            <div className="login-error">
+              {error}
+            </div>
+          )}
 
-          <div className="auth-features">
-            {[
-              { icon: '✅', text: 'Free to get started, no credit card needed' },
-              { icon: '🚀', text: 'Set up in minutes, not hours' },
-              { icon: '🤖', text: 'AI processes your first invoice instantly' },
-              { icon: '📈', text: 'Comprehensive expense analytics dashboard' },
-            ].map((f, i) => (
-              <div key={i} className="auth-feature">
-                <div className="auth-feature-icon">{f.icon}</div>
-                <span>{f.text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
 
-      {/* Form */}
-      <div className="auth-right">
-        <div className="auth-form-container">
-          <h2 className="auth-form-title">Create account</h2>
-          <p className="auth-form-sub">Start managing your finances smarter</p>
-
-          {error && <div className="error-message">{error}</div>}
-
+          {/* Register Form */}
           <form onSubmit={handleSubmit}>
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Full Name</label>
+
+            {/* Name + Company */}
+            <div className="register-two-column">
+
+              {/* Full Name */}
+              <div className="login-form-group">
+
+                <label>Full Name</label>
+
                 <input
-                  className="form-input"
                   type="text"
                   name="name"
                   value={form.name}
@@ -92,24 +102,34 @@ export default function Register() {
                   required
                   autoFocus
                 />
+
               </div>
-              <div className="form-group">
-                <label className="form-label">Company (optional)</label>
+
+
+              {/* Company */}
+              <div className="login-form-group">
+
+                <label>Company</label>
+
                 <input
-                  className="form-input"
                   type="text"
                   name="company"
                   value={form.company}
                   onChange={handleChange}
                   placeholder="Acme Corp"
                 />
+
               </div>
+
             </div>
 
-            <div className="form-group">
-              <label className="form-label">Email address</label>
+
+            {/* Email */}
+            <div className="login-form-group">
+
+              <label>Email Address</label>
+
               <input
-                className="form-input"
                 type="email"
                 name="email"
                 value={form.email}
@@ -117,32 +137,177 @@ export default function Register() {
                 placeholder="you@company.com"
                 required
               />
+
             </div>
 
-            <div className="form-group">
-              <label className="form-label">Password</label>
+
+            {/* Password */}
+            <div className="login-form-group password-group">
+
+              <label>Password</label>
+
               <input
-                className="form-input"
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 name="password"
                 value={form.password}
                 onChange={handleChange}
                 placeholder="Min. 6 characters"
                 required
               />
+
+              <button
+                type="button"
+                className="password-toggle"
+                onClick={() => setShowPassword(!showPassword)}
+              >
+                {showPassword ? 'Hide' : 'Show'}
+              </button>
+
             </div>
 
-            <button className="btn-primary" type="submit" disabled={loading}>
-              {loading ? <span className="spinner" /> : 'Create Account →'}
+
+            {/* Password Information */}
+            <div className="password-hint">
+              Password must contain at least 6 characters.
+            </div>
+
+
+            {/* Create Account */}
+            <button
+              type="submit"
+              className="login-button"
+              disabled={loading}
+            >
+              {loading ? 'Creating Account...' : 'Create Account →'}
             </button>
+
+
+            {/* Login Link */}
+            <p className="register-text">
+
+              Already have an account?{' '}
+
+              <Link to="/login" className="signin-link">
+                Sign in
+              </Link>
+
+            </p>
+
           </form>
 
-          <div className="auth-switch">
-            Already have an account?{' '}
-            <Link to="/login">Sign in</Link>
-          </div>
         </div>
+
       </div>
+
+
+      {/* =====================================================
+          RIGHT SIDE - PROMOTIONAL PANEL
+          ===================================================== */}
+
+      <div className="login-right">
+
+        {/* Background decorations */}
+        <div className="login-decoration decoration-one"></div>
+
+        <div className="login-decoration decoration-two"></div>
+
+
+        <div className="login-promo">
+
+          <h2>
+            Start managing your finances smarter
+          </h2>
+
+          <p>
+            Join Expenza and simplify invoice management,
+            expense tracking, and financial insights with AI.
+          </p>
+
+
+          {/* Benefits */}
+          <div className="register-benefits">
+
+            <div className="register-benefit">
+
+              <div className="benefit-icon">
+                ✓
+              </div>
+
+              <div>
+                <h3>Free to get started</h3>
+
+                <p>
+                  No credit card required.
+                </p>
+              </div>
+
+            </div>
+
+
+            <div className="register-benefit">
+
+              <div className="benefit-icon">
+                ⚡
+              </div>
+
+              <div>
+                <h3>Set up in minutes</h3>
+
+                <p>
+                  Start managing your finances quickly.
+                </p>
+              </div>
+
+            </div>
+
+
+            <div className="register-benefit">
+
+              <div className="benefit-icon">
+                🤖
+              </div>
+
+              <div>
+                <h3>AI-powered automation</h3>
+
+                <p>
+                  Automatically categorize invoices and expenses.
+                </p>
+              </div>
+
+            </div>
+
+          </div>
+
+
+          {/* Small Preview */}
+          <div className="register-preview">
+
+            <div className="register-preview-header">
+              <span>Monthly Expenses</span>
+              <strong>₹42,850</strong>
+            </div>
+
+            <div className="register-progress">
+
+              <div className="progress-fill"></div>
+
+            </div>
+
+            <div className="register-preview-footer">
+
+              <span>Budget Used</span>
+
+              <strong>68%</strong>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
     </div>
   );
 }

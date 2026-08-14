@@ -38,8 +38,10 @@ export const authService = {
   login: (data) => api.post('/auth/login', data),
   logout: () => api.post('/auth/logout'),
   getMe: () => api.get('/auth/me'),
+  forgotPassword: (email) => api.post('/auth/forgot-password', { email }),
   googleLogin: (token) => api.post('/auth/google', { token }),
 };
+
 
 // Dashboard
 export const dashboardService = {

@@ -50,12 +50,29 @@ export default function Invoices() {
   const handleCreate = async (e) => {
     e.preventDefault();
     setError('');
+
+    const amountNum = parseFloat(form.amount);
+    const taxNum = parseFloat(form.tax || 0);
+
+    if (isNaN(amountNum) || amountNum <= 0) {
+      setError('Amount must be a positive number');
+      return;
+    }
+    if (isNaN(taxNum) || taxNum < 0) {
+      setError('Tax must be a non-negative number');
+      return;
+    }
+    if (form.client_email && (!form.client_email.includes('@') || !form.client_email.includes('.'))) {
+      setError('Please provide a valid client email address');
+      return;
+    }
+
     setSubmitting(true);
     try {
       await invoiceService.create({
         ...form,
-        amount: parseFloat(form.amount),
-        tax: parseFloat(form.tax || 0),
+        amount: amountNum,
+        tax: taxNum,
       });
       setShowModal(false);
       setForm({ client_name: '', client_email: '', amount: '', tax: '', description: '', due_date: '', status: 'draft' });
@@ -66,6 +83,7 @@ export default function Invoices() {
       setSubmitting(false);
     }
   };
+
 
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this invoice?')) return;
@@ -101,25 +119,54 @@ export default function Invoices() {
 
   const handleRealUpload = async (file) => {
     if (!file) return;
+
+    // Validate extension
+    const ext = file.name.split('.').pop().toLowerCase();
+    const allowed = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'];
+    if (!allowed.includes(ext)) {
+      setUploadResult({ error: `Invalid file type '.${ext}'. Allowed types: ${allowed.join(', ')}` });
+      return;
+    }
+
+    // Validate size (16MB max)
+    const maxSize = 16 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setUploadResult({ error: 'File exceeds maximum limit of 16MB.' });
+      return;
+    }
+
     setUploadLoading(true);
     setUploadResult(null);
     try {
-      const res = await ocrService.extract(file);
+      const res = await invoiceService.upload(file);
       const data = res.data.extracted_data;
-      // Normalize OCR result to match invoice fields
+
       setUploadResult({
-        client_name: data.vendor || 'Unknown Vendor',
-        amount: data.subtotal || data.total || 0,
-        tax: data.tax || 0,
-        total_amount: data.total || data.subtotal || 0,
-        description: `Imported from ${file.name}`,
-        ai_category: data.ai_category || 'Office Supplies',
-        ai_confidence: data.ai_confidence || 75,
-        extraction_method: data.extraction_method || 'simulation',
-        raw: data,
+        ...data,
+        extraction_method: res.data.extraction_method || data.extraction_method || 'ocr',
+        invoice_saved: !!res.data.invoice,
+        invoice: res.data.invoice || null,
+        file_name: res.data.file_name,
+        file_url: res.data.file_url,
+        message: res.data.message,
       });
     } catch (err) {
-      setUploadResult({ error: 'OCR extraction failed. Please try again.' });
+      const resp = err.response?.data;
+      if (err.response?.status === 422 && resp?.extracted_data) {
+        const data = resp.extracted_data;
+        setUploadResult({
+          ...data,
+          error: resp.message || resp.error || 'Manual review required',
+          needs_manual_review: data.needs_manual_review || true,
+          requires_review: data.requires_review || true,
+          manual_review_reason: data.manual_review_reason,
+          file_name: resp.file_name,
+          file_url: resp.file_url,
+          extraction_method: resp.extraction_method || data.extraction_method || 'ocr',
+        });
+      } else {
+        setUploadResult({ error: err.response?.data?.error || 'OCR extraction failed. Please try again.' });
+      }
     } finally {
       setUploadLoading(false);
     }
@@ -127,24 +174,16 @@ export default function Invoices() {
 
   const handleSaveUploaded = async () => {
     if (!uploadResult) return;
-    setSubmitting(true);
-    try {
-      await invoiceService.create({
-        client_name: uploadResult.client_name,
-        amount: uploadResult.amount,
-        tax: uploadResult.tax,
-        description: uploadResult.description,
-        status: 'draft',
-      });
+    if (uploadResult.invoice_saved) {
       setShowUploadModal(false);
       setUploadResult(null);
       await fetchInvoices();
-    } catch (err) {
-      alert('Save failed');
-    } finally {
-      setSubmitting(false);
+      return;
     }
+
+    alert('Invoice cannot be saved automatically because OCR requires manual review. Please correct the file or review the extracted data.');
   };
+
 
   return (
     <div className="data-page fade-in">

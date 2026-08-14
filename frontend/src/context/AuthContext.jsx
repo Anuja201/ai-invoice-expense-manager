@@ -4,11 +4,13 @@
  */
 
 import { createContext, useContext, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { authService } from '../services/api';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
+  const navigate = useNavigate();
   const [user, setUser] = useState(() => {
     const stored = localStorage.getItem('user');
     return stored ? JSON.parse(stored) : null;
@@ -51,11 +53,14 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    try { await authService.logout(); } catch (_) {}
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    setUser(null);
-  };
+  try {
+    await authService.logout();
+  } catch (_) {}
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  setUser(null);
+  window.location.href = '/';
+};
 
   return (
     <AuthContext.Provider value={{ user, login, register, logout, loading }}>

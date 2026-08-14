@@ -1,118 +1,233 @@
 /**
  * pages/Login.jsx
- * Login form with JWT auth
+ * Expenza AI - Login Page
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import '../styles/Auth.css';
 
 export default function Login() {
-  const [form, setForm] = useState({ email: '', password: '' });
+  const [form, setForm] = useState({
+    email: localStorage.getItem('remembered_email') || '',
+    password: '',
+  });
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(Boolean(localStorage.getItem('remembered_email')));
+
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const handleChange = (e) => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
+  const handleChange = (e) => {
+    setForm({
+      ...form,
+      [e.target.name]: e.target.value,
+    });
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
     setError('');
     setLoading(true);
+
     try {
       await login(form.email, form.password);
+      if (rememberMe) {
+        localStorage.setItem('remembered_email', form.email);
+      } else {
+        localStorage.removeItem('remembered_email');
+      }
       navigate('/dashboard');
     } catch (err) {
-      setError(err.response?.data?.error || 'Login failed. Please try again.');
+      setError(
+        err.response?.data?.error ||
+        'Login failed. Please check your email and password.'
+      );
     } finally {
       setLoading(false);
     }
   };
 
+
   return (
-    <div className="auth-wrapper">
-      {/* Left panel */}
-      <div className="auth-left">
-        <div className="auth-left-content">
-          <div className="auth-brand">
-            <div className="auth-brand-icon">IM</div>
-            <span className="auth-brand-name">InvoiceAI</span>
+    <div className="login-page">
+
+      {/* LEFT SIDE */}
+      <div className="login-left">
+
+        <div className="login-form-container">
+
+          {/* Logo */}
+          <div className="login-logo">
+            <h1>Expenza</h1>
+            <p>AI Invoice & Expense Manager for Businesses</p>
           </div>
 
-          <h1 className="auth-headline">
-            Smart Finance<br />
-            <span>Powered by AI</span>
-          </h1>
+          {/* Error */}
+          {error && (
+            <div className="login-error">
+              {error}
+            </div>
+          )}
 
-          <p className="auth-sub">
-            Automate invoice management, track expenses, and gain deep insights with AI-powered categorization.
-          </p>
-
-          <div className="auth-features">
-            {[
-              { icon: '🤖', text: 'AI auto-categorization of invoices & expenses' },
-              { icon: '📊', text: 'Real-time analytics and spending insights' },
-              { icon: '🔒', text: 'Bank-grade security with JWT authentication' },
-              { icon: '📄', text: 'PDF invoice parsing and management' },
-            ].map((f, i) => (
-              <div key={i} className="auth-feature">
-                <div className="auth-feature-icon">{f.icon}</div>
-                <span>{f.text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Right panel - form */}
-      <div className="auth-right">
-        <div className="auth-form-container">
-          <h2 className="auth-form-title">Welcome back</h2>
-          <p className="auth-form-sub">Sign in to your account to continue</p>
-
-          {error && <div className="error-message">{error}</div>}
-
+          {/* Login Form */}
           <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label className="form-label">Email address</label>
+
+            {/* Email */}
+            <div className="login-form-group">
+              <label>Email</label>
+
               <input
-                className="form-input"
                 type="email"
                 name="email"
                 value={form.email}
                 onChange={handleChange}
-                placeholder="you@company.com"
+                placeholder="business.email@expenza.com"
                 required
                 autoFocus
               />
             </div>
 
-            <div className="form-group">
-              <label className="form-label">Password</label>
+            {/* Password */}
+            <div className="login-form-group password-group">
+
+              <label>Password</label>
+
               <input
-                className="form-input"
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 name="password"
                 value={form.password}
                 onChange={handleChange}
                 placeholder="••••••••"
                 required
               />
+
+              <button
+                type="button"
+                className="password-toggle"
+                onClick={() => setShowPassword(!showPassword)}
+              >
+                {showPassword ? 'Hide' : 'Show'}
+              </button>
+
             </div>
 
-            <button className="btn-primary" type="submit" disabled={loading}>
-              {loading ? <span className="spinner" /> : 'Sign In →'}
+            {/* Remember / Forgot */}
+            <div className="login-options">
+
+              <label className="remember-me">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                />
+                <span>Remember Me</span>
+              </label>
+
+              <Link
+                to="/forgot-password"
+                className="forgot-link"
+              >
+                Forgot Your Password?
+              </Link>
+
+            </div>
+
+            {/* Login Button */}
+            <button
+              type="submit"
+              className="login-button"
+              disabled={loading}
+            >
+              {loading ? 'Logging in...' : 'Log In'}
             </button>
+
+            {/* Register */}
+            <p className="register-text">
+              Don't Have An Account?{' '}
+              <Link to="/register" className="register-link">
+                Register Now.
+              </Link>
+            </p>
+
           </form>
 
-          <div className="auth-switch">
-            Don't have an account?{' '}
-            <Link to="/register">Create one free</Link>
-          </div>
         </div>
       </div>
+
+
+      {/* RIGHT SIDE */}
+      <div className="login-right">
+
+        <div className="login-decoration decoration-one"></div>
+        <div className="login-decoration decoration-two"></div>
+
+        <div className="login-promo">
+
+          <h2>
+            Intelligently track and manage finances
+          </h2>
+
+          <p>
+            Log in to access your Expenza dashboard and streamline
+            your invoice and expense management.
+          </p>
+
+
+          {/* Dashboard Preview */}
+          <div className="dashboard-preview">
+
+            <div className="preview-cards">
+
+              <div className="preview-card">
+                <span>Total Sales</span>
+                <strong>₹1,89,374</strong>
+              </div>
+
+              <div className="preview-card">
+                <span>Profit</span>
+                <strong>₹25,684</strong>
+              </div>
+
+            </div>
+
+
+            {/* Chart */}
+            <div className="preview-chart">
+
+              <div
+                className="chart-bar chart-bar-1"
+              ></div>
+
+              <div
+                className="chart-bar chart-bar-2"
+              ></div>
+
+              <div
+                className="chart-bar chart-bar-3"
+              ></div>
+
+              <div
+                className="chart-bar chart-bar-4"
+              ></div>
+
+              <div
+                className="chart-bar chart-bar-5"
+              ></div>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
     </div>
   );
 }
