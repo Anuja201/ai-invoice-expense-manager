@@ -135,6 +135,15 @@ def _empty_result():
         "manual_review_reason": "OCR field extraction unverified",
         "validation_warnings": [],
         "raw_text": "",
+        "confidence_per_field": {
+            "vendor": False,
+            "invoice_number": False,
+            "date": False,
+            "due_date": False,
+            "subtotal": False,
+            "tax": False,
+            "total_amount": False,
+        },
     }
 
 
@@ -145,6 +154,11 @@ def get_failed_ocr_response(raw_text="", reason="OCR extraction failed"):
     result["manual_review_reason"] = reason
     result["error"] = reason
     result["raw_text"] = raw_text[:10000] if raw_text else ""
+    # All fields uncertain
+    result["confidence_per_field"] = {
+        "vendor": False, "invoice_number": False, "date": False,
+        "due_date": False, "subtotal": False, "tax": False, "total_amount": False,
+    }
     return result
 
 
@@ -341,21 +355,23 @@ def _label_based_field_parser(raw_text, filename=""):
         next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
         combined_two_lines = f"{line} {next_line}"
 
-        # 1. Vendor (Label-Based)
+        # 1. Vendor (Label-Based only — no GSTIN code fallback)
         if not vendor:
-            v_match = re.search(r"^(?:Vendor|Supplier|Merchant|Billed By|Company|Seller|Payee|Issued By|Store)[\s:]+([A-Za-z0-9\s.,&'-]{2,50})$", line, re.IGNORECASE)
+            v_match = re.search(
+                r"^(?:Vendor|Supplier|Merchant|Billed By|Company|Seller|Payee|Issued By|Store)[\s:]+([A-Za-z0-9\s.,&'-]{2,60})$",
+                line, re.IGNORECASE
+            )
             if v_match:
                 cand = v_match.group(1).strip()
                 if cand.lower() not in {"invoice", "tax invoice", "receipt", "total", "bill to", "statement", "amount"}:
                     vendor = cand
-            elif re.search(r"GSTIN[\s:]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", line, re.IGNORECASE):
-                g_match = re.search(r"GSTIN[\s:]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", line, re.IGNORECASE)
-                if g_match:
-                    vendor = g_match.group(1).strip()
 
         # 2. Invoice / Receipt Number (Label-Based)
         if not invoice_number:
-            inv_match = re.search(r"(?:Tax\s*Invoice\s*No|Invoice\s*Number|Invoice\s*No|Invoice\s*#|Inv\s*No|Inv\s*#|Bill\s*No|Receipt\s*No|Receipt\s*#|Ref\s*No)[\s:]+([A-Za-z0-9-_/#]{2,30})", line, re.IGNORECASE)
+            inv_match = re.search(
+                r"(?:Tax\s*Invoice\s*No|Invoice\s*Number|Invoice\s*No|Invoice\s*#|Inv\s*No|Inv\s*#|Bill\s*No|Receipt\s*No|Receipt\s*#|Ref\s*No)[\s:]+([A-Za-z0-9-_/#]{2,30})",
+                line, re.IGNORECASE
+            )
             if inv_match:
                 num_cand = inv_match.group(1).strip()
                 if num_cand.lower() not in {"date", "no", "number", "tax"}:
@@ -363,16 +379,22 @@ def _label_based_field_parser(raw_text, filename=""):
             elif re.search(r"\b(INV-[A-Za-z0-9-_]{3,20})\b", line, re.IGNORECASE):
                 invoice_number = re.search(r"\b(INV-[A-Za-z0-9-_]{3,20})\b", line, re.IGNORECASE).group(1).strip()
 
-        # 3. Date & Due Date (Label-Based)
+        # 3. Date & Due Date (Label-Based) — due_date stays None if not explicitly found
         if not date_str:
-            d_match = re.search(r"(?:Invoice\s*Date|Receipt\s*Date|Bill\s*Date|Date\s*of\s*Issue|Txn\s*Date|^Date)[\s:]+([A-Za-z0-9,\s/-]{6,25})", line, re.IGNORECASE)
+            d_match = re.search(
+                r"(?:Invoice\s*Date|Receipt\s*Date|Bill\s*Date|Date\s*of\s*Issue|Txn\s*Date|^Date)[\s:]+([A-Za-z0-9,\s/-]{6,25})",
+                line, re.IGNORECASE
+            )
             if d_match:
                 parsed_d = _normalize_date(d_match.group(1).strip())
                 if parsed_d:
                     date_str = parsed_d
 
         if not due_date_str:
-            due_match = re.search(r"(?:Due\s*Date|Payment\s*Due|Pay\s*By|^Due)[\s:]+([A-Za-z0-9,\s/-]{6,25})", line, re.IGNORECASE)
+            due_match = re.search(
+                r"(?:Due\s*Date|Payment\s*Due|Pay\s*By|^Due)[\s:]+([A-Za-z0-9,\s/-]{6,25})",
+                line, re.IGNORECASE
+            )
             if due_match:
                 parsed_due = _normalize_date(due_match.group(1).strip())
                 if parsed_due:
@@ -380,7 +402,10 @@ def _label_based_field_parser(raw_text, filename=""):
 
         # 4. Total Amount (Label-Based)
         if total_amount is None:
-            tot_match = re.search(r"(?:Grand\s*Total|Total\s*Amount|Total\s*Payable|Net\s*Amount|Total\s*Due|Amount\s*Paid|^Total)[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
+            tot_match = re.search(
+                r"(?:Grand\s*Total|Total\s*Amount|Total\s*Payable|Net\s*Amount|Total\s*Due|Amount\s*Paid|^Total)[^\d\n]*([\d,]+\.?\d*)",
+                combined_two_lines, re.IGNORECASE
+            )
             if tot_match:
                 parsed_tot = _parse_number(tot_match.group(1))
                 if parsed_tot is not None and parsed_tot > 0:
@@ -388,7 +413,10 @@ def _label_based_field_parser(raw_text, filename=""):
 
         # 5. Subtotal (Label-Based)
         if subtotal is None:
-            sub_match = re.search(r"(?:Subtotal|Sub\s*Total|Sub-Total|Taxable\s*Value|Taxable\s*Amount|Net\s*Value)[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
+            sub_match = re.search(
+                r"(?:Subtotal|Sub\s*Total|Sub-Total|Taxable\s*Value|Taxable\s*Amount|Net\s*Value)[^\d\n]*([\d,]+\.?\d*)",
+                combined_two_lines, re.IGNORECASE
+            )
             if sub_match:
                 parsed_sub = _parse_number(sub_match.group(1))
                 if parsed_sub is not None and parsed_sub > 0:
@@ -410,12 +438,20 @@ def _label_based_field_parser(raw_text, filename=""):
             if igst_match:
                 igst_val = _parse_number(igst_match.group(1))
 
-    # Top header fallback for Vendor if not matched by label
+    # Top header fallback for Vendor — only plain company-name lines, never GSTIN codes
     if not vendor and lines:
-        ignore_keywords = {"invoice", "tax invoice", "receipt", "bill", "cash receipt", "statement", "date", "total", "amount", "page", "subtotal", "phone", "email", "gstin"}
+        ignore_keywords = {
+            "invoice", "tax invoice", "receipt", "bill", "cash receipt",
+            "statement", "date", "total", "amount", "page", "subtotal",
+            "phone", "email", "gstin", "gst", "pan", "cin", "www", "http"
+        }
         for line in lines[:5]:
             l_lower = line.lower()
-            if len(line) >= 3 and not any(kw in l_lower for kw in ignore_keywords) and not re.match(r"^[\d\s.,/\-#]+$", line):
+            # Skip lines that are purely numeric/symbol, or look like GSTIN/PAN codes
+            if (len(line) >= 3
+                    and not any(kw in l_lower for kw in ignore_keywords)
+                    and not re.match(r"^[\d\s.,/\-#@:]+$", line)
+                    and not re.match(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$", line)):
                 vendor = line.strip()
                 break
 
@@ -431,7 +467,10 @@ def _label_based_field_parser(raw_text, filename=""):
     elif igst_val is not None:
         tax = round(igst_val, 2)
     else:
-        gen_tax_match = re.search(r"(?:^Tax|GST|VAT|Total\s*Tax)[\s:₹$Rs.%@0-9]*[\s:]+([\d,]+\.?\d*)", clean_text, re.IGNORECASE | re.MULTILINE)
+        gen_tax_match = re.search(
+            r"(?:^Tax|GST|VAT|Total\s*Tax)[\s:₹$Rs.%@0-9]*[\s:]+([\d,]+\.?\d*)",
+            clean_text, re.IGNORECASE | re.MULTILINE
+        )
         if gen_tax_match:
             tax = _parse_number(gen_tax_match.group(1))
 
@@ -446,10 +485,12 @@ def _label_based_field_parser(raw_text, filename=""):
     elif "£" in clean_text or "GBP" in clean_text:
         currency = "GBP"
 
-    # Line Items
+    # Line Items — only genuine parsed rows; never fabricate synthetic entries
     line_items = []
     for line in lines:
-        item_match = re.search(r"^([A-Za-z0-9\s.,&'-]{3,50})\s+(\d+)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)$", line)
+        item_match = re.search(
+            r"^([A-Za-z0-9\s.,&'-]{3,50})\s+(\d+)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)$", line
+        )
         if item_match:
             desc = item_match.group(1).strip()
             if desc.lower() not in {"total", "subtotal", "tax", "description", "item"}:
@@ -459,35 +500,43 @@ def _label_based_field_parser(raw_text, filename=""):
                     "unit_price": float(item_match.group(3).replace(",", "")),
                     "total_price": float(item_match.group(4).replace(",", ""))
                 })
+    # No fallback fabrication — return empty list when no real items found
 
-    if not line_items and (vendor or total_amount):
-        line_items.append({
-            "description": f"{vendor or 'Document'} Items / Services",
-            "quantity": 1.0,
-            "unit_price": total_amount or 0.0,
-            "total_price": total_amount or 0.0
-        })
-
-    # AI Category & Confidence Calculation
-    ai_cat = categorize(f"{vendor or ''} {clean_text} {filename}") if (vendor or clean_text) else {"category": "Uncategorized", "confidence": 0}
+    # AI Category & Confidence
+    ai_cat = (
+        categorize(f"{vendor or ''} {clean_text} {filename}")
+        if (vendor or clean_text)
+        else {"category": "Uncategorized", "confidence": 0}
+    )
 
     detected_count = sum(1 for f in [vendor, invoice_number, date_str, total_amount] if f is not None)
     confidence_score = round((detected_count / 4.0) * 100, 2)
 
     missing_fields = []
-    if not vendor: missing_fields.append("vendor name")
-    if not invoice_number: missing_fields.append("invoice number")
-    if not date_str: missing_fields.append("date")
+    if not vendor:          missing_fields.append("vendor name")
+    if not invoice_number:  missing_fields.append("invoice number")
+    if not date_str:        missing_fields.append("date")
     if total_amount is None: missing_fields.append("total amount")
 
     needs_review = len(missing_fields) > 0
     review_reason = f"Uncertain fields: {', '.join(missing_fields)}" if missing_fields else None
 
+    # Per-field confidence flags
+    confidence_per_field = {
+        "vendor": vendor is not None,
+        "invoice_number": invoice_number is not None,
+        "date": date_str is not None,
+        "due_date": due_date_str is not None,  # True only if explicitly found
+        "subtotal": subtotal is not None,
+        "tax": tax is not None,
+        "total_amount": total_amount is not None,
+    }
+
     return {
         "vendor": vendor,
         "invoice_number": invoice_number,
         "date": date_str,
-        "due_date": due_date_str or date_str,
+        "due_date": due_date_str,       # None if not found — never copy from date
         "subtotal": subtotal,
         "tax": tax,
         "total_amount": total_amount,
@@ -499,6 +548,7 @@ def _label_based_field_parser(raw_text, filename=""):
         "requires_review": needs_review,
         "manual_review_reason": review_reason,
         "validation_warnings": [f"Missing: {m}" for m in missing_fields],
+        "confidence_per_field": confidence_per_field,
         "raw_text": clean_text[:10000] if clean_text else ""
     }
 
@@ -666,12 +716,46 @@ def _prepare_image_for_gemini(file_path):
         return None, None, str(exc)
 
 
+_GEMINI_SCHEMA_PROMPT = """
+Extract structured data from this invoice or receipt document and return ONLY a JSON object with these exact fields:
+
+{
+  "vendor": "<string: company or person name who issued the invoice, or null if not found>",
+  "invoice_number": "<string: invoice/receipt/bill number, or null if not found>",
+  "date": "<string: invoice/receipt date in YYYY-MM-DD format, or null if not found>",
+  "due_date": "<string: payment due date in YYYY-MM-DD format, or null — do NOT copy from date unless explicitly stated as due date>",
+  "subtotal": "<number: amount before tax, or null if not found>",
+  "tax": "<number: total tax amount (CGST+SGST or IGST or GST/VAT), or null if not found>",
+  "total_amount": "<number: final payable amount including tax, or null if not found>",
+  "currency": "<string: INR, USD, EUR, or GBP — default INR if rupee symbols or Indian context>",
+  "line_items": [
+    {"description": "<string>", "quantity": <number>, "unit_price": <number>, "total_price": <number>}
+  ],
+  "ai_category": "<string: one of: Food & Dining, Travel, Office Supplies, Utilities, Healthcare, Education, Entertainment, Shopping, Technology, Other>",
+  "ai_confidence": <number: your confidence 0-100 that the extracted data is accurate>
+}
+
+CRITICAL RULES:
+- Return null for any field you cannot find with certainty. Never invent or estimate values.
+- Do NOT calculate missing values. If subtotal is not shown, return null — do not subtract tax from total.
+- Do NOT copy date into due_date unless the document explicitly labels a due/payment date.
+- Return an empty array [] for line_items if no itemized rows are present.
+- Numbers must be plain floats (no currency symbols or commas).
+- Return ONLY the JSON object, no explanation text.
+"""
+
+
 def _call_gemini_with_image(image_bytes, mime_type):
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
         return None, "GEMINI_API_KEY unconfigured"
     encoded = base64.b64encode(image_bytes).decode("utf-8")
     payload = {
-        "contents": [{"parts": [{"text": "Extract invoice/receipt JSON"}, {"inline_data": {"mime_type": mime_type, "data": encoded}}]}],
+        "contents": [{
+            "parts": [
+                {"text": _GEMINI_SCHEMA_PROMPT},
+                {"inline_data": {"mime_type": mime_type, "data": encoded}}
+            ]
+        }],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}
     }
     try:
@@ -687,7 +771,14 @@ def _call_gemini_with_text(document_text):
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
         return None, "GEMINI_API_KEY unconfigured"
     payload = {
-        "contents": [{"parts": [{"text": f"Extract invoice/receipt JSON from text:\n{document_text[:30000]}"}]}],
+        "contents": [{
+            "parts": [{
+                "text": (
+                    f"{_GEMINI_SCHEMA_PROMPT}\n\n"
+                    f"DOCUMENT TEXT:\n{document_text[:30000]}"
+                )
+            }]
+        }],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}
     }
     try:
@@ -730,25 +821,40 @@ def _normalize_gemini_result(data, raw_text=""):
     result["vendor"] = data.get("vendor") or None
     result["invoice_number"] = data.get("invoice_number") or None
     result["date"] = _normalize_date(data.get("date"))
-    result["due_date"] = _normalize_date(data.get("due_date")) or result["date"]
+    # due_date: ONLY use explicitly returned value — never copy from date
+    result["due_date"] = _normalize_date(data.get("due_date")) or None
     result["subtotal"] = _parse_number(data.get("subtotal"))
     result["tax"] = _parse_number(data.get("tax"))
     result["total_amount"] = _parse_number(data.get("total_amount"))
     result["currency"] = data.get("currency") or "INR"
     result["line_items"] = data.get("line_items") or []
     result["ai_category"] = data.get("ai_category") or "Uncategorized"
-    result["ai_confidence"] = float(data.get("ai_confidence", 80.0))
+    # Use Gemini's confidence only if explicitly returned; 0.0 otherwise — never invent a score
+    raw_conf = data.get("ai_confidence")
+    result["ai_confidence"] = float(raw_conf) if raw_conf is not None else 0.0
     result["raw_text"] = raw_text[:10000] if raw_text else str(data)[:1000]
 
     missing = []
-    if not result["vendor"]: missing.append("vendor name")
-    if not result["invoice_number"]: missing.append("invoice number")
-    if not result["date"]: missing.append("date")
+    if not result["vendor"]:          missing.append("vendor name")
+    if not result["invoice_number"]:  missing.append("invoice number")
+    if not result["date"]:            missing.append("date")
     if result["total_amount"] is None: missing.append("total amount")
 
     result["needs_manual_review"] = len(missing) > 0
     result["requires_review"] = len(missing) > 0
     result["manual_review_reason"] = f"Uncertain fields: {', '.join(missing)}" if missing else None
+    result["validation_warnings"] = [f"Missing: {m}" for m in missing]
+
+    # Per-field confidence flags
+    result["confidence_per_field"] = {
+        "vendor": result["vendor"] is not None,
+        "invoice_number": result["invoice_number"] is not None,
+        "date": result["date"] is not None,
+        "due_date": result["due_date"] is not None,
+        "subtotal": result["subtotal"] is not None,
+        "tax": result["tax"] is not None,
+        "total_amount": result["total_amount"] is not None,
+    }
     return result
 
 
