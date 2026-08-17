@@ -1,20 +1,28 @@
 """
-routes/invoices.py - Invoice CRUD endpoints
-Supports create, list, get, update, delete, and PDF upload + AI categorization.
-PDF upload uses the OCR pipeline from routes/ocr.py to extract structured data.
+routes/invoices.py
+
+CRUD operations for client invoices, including upload/OCR integration for PDF, Images, and Word DOC/DOCX documents,
+line item database persistence, and validation checks.
 """
 
-from flask import Blueprint, request, jsonify
+import os
+import random
+import string
+import logging
+from datetime import datetime
+# pyrefly: ignore [missing-import]
+from werkzeug.utils import secure_filename
+
+# pyrefly: ignore [missing-import]
+from flask import Blueprint, request, jsonify, send_from_directory
+# pyrefly: ignore [missing-import]
 from flask_jwt_extended import jwt_required, get_jwt_identity
+
 from utils.db import get_db
 from utils.ai_categorizer import categorize
 from config import Config
-import random
-import string
-from datetime import datetime
-from werkzeug.utils import secure_filename
-import os
-import tempfile
+
+logger = logging.getLogger("invoices_route")
 
 invoices_bp = Blueprint("invoices", __name__)
 
@@ -22,11 +30,9 @@ UPLOAD_FOLDER = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
     Config.UPLOAD_FOLDER
 )
-
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-ALLOWED_EXTENSIONS = Config.ALLOWED_EXTENSIONS
 
-# Ensure upload folder exists
+ALLOWED_EXTENSIONS = Config.ALLOWED_EXTENSIONS
 
 
 def allowed_file(filename):
@@ -34,7 +40,7 @@ def allowed_file(filename):
 
 
 def generate_invoice_number():
-    """Generate unique invoice number like INV-2024-XXXX"""
+    """Generate unique invoice number like INV-2026-XXXX"""
     year = datetime.now().year
     suffix = "".join(random.choices(string.digits, k=4))
     return f"INV-{year}-{suffix}"
@@ -42,15 +48,77 @@ def generate_invoice_number():
 
 def serialize_invoice(inv):
     """Convert datetime fields to ISO strings for JSON serialization."""
+    if not inv:
+        return None
     for field in ["created_at", "updated_at"]:
         if inv.get(field):
             inv[field] = inv[field].isoformat()
     if inv.get("due_date"):
         inv["due_date"] = str(inv["due_date"])
-    # Convert ai_confidence to integer for frontend display (e.g., "85" instead of "85.50")
     if inv.get("ai_confidence") is not None:
         inv["ai_confidence"] = int(inv["ai_confidence"])
     return inv
+
+
+import re
+
+def parse_clean_date(date_val):
+    """Safely parse date strings into YYYY-MM-DD or return None for MySQL DATE columns."""
+    if not date_val or str(date_val).strip().lower() in ("", "none", "null", "not detected", "n/a", "unknown"):
+        return None
+    d_str = str(date_val).strip()
+    patterns = [
+        ("%Y-%m-%d", r"^\d{4}-\d{2}-\d{2}$"),
+        ("%d/%m/%Y", r"^\d{1,2}/\d{1,2}/\d{4}$"),
+        ("%d-%m-%Y", r"^\d{1,2}-\d{1,2}-\d{4}$"),
+        ("%m/%d/%Y", r"^\d{1,2}/\d{1,2}/\d{4}$"),
+        ("%Y/%m/%d", r"^\d{4}/\d{1,2}/\d{1,2}$"),
+    ]
+    for fmt_str, regex in patterns:
+        if re.match(regex, d_str):
+            try:
+                dt = datetime.strptime(d_str, fmt_str)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", d_str)
+    if m:
+        y, m_, d = m.groups()
+        return f"{y}-{int(m_):02d}-{int(d):02d}"
+    return None
+
+
+VALID_STATUSES = {"draft", "sent", "paid", "unpaid", "overdue", "cancelled"}
+
+def sanitize_status(status_val):
+    """Sanitize status string to match MySQL ENUM('draft','sent','paid','unpaid','overdue','cancelled')."""
+    if not status_val:
+        return "draft"
+    st = str(status_val).strip().lower()
+    if st in VALID_STATUSES:
+        return st
+    if "paid" in st and "unpaid" not in st:
+        return "paid"
+    if "unpaid" in st or "pending" in st:
+        return "unpaid"
+    if "overdue" in st:
+        return "overdue"
+    if "cancel" in st:
+        return "cancelled"
+    if "sent" in st:
+        return "sent"
+    return "draft"
+
+
+def safe_float(val, default=0.0):
+    if val is None or val == "":
+        return default
+    try:
+        if isinstance(val, str):
+            val = re.sub(r'[^\d.-]', '', val)
+        return float(val) if val else default
+    except (ValueError, TypeError):
+        return default
 
 
 # ──────────────────────── CRUD Endpoints ──────────────────────── #
@@ -75,7 +143,7 @@ def list_invoices():
 
             if status_filter:
                 query += " AND i.status = %s"
-                params.append(status_filter)
+                params.append(sanitize_status(status_filter))
 
             if search:
                 query += " AND (i.client_name LIKE %s OR i.invoice_number LIKE %s)"
@@ -94,47 +162,81 @@ def list_invoices():
 @jwt_required()
 def create_invoice():
     user_id = get_jwt_identity()
-    data = request.get_json()
+    data = request.get_json() or {}
 
-    client_name = data.get("client_name", "").strip()
-    amount = float(data.get("amount", 0))
-    tax = float(data.get("tax", 0))
+    client_name = (data.get("client_name") or data.get("vendor_name") or data.get("vendor") or "General Client").strip()
+    amount = safe_float(data.get("amount") or data.get("subtotal"), 0.0)
+    tax = safe_float(data.get("tax") or data.get("tax_amount"), 0.0)
+    total_amount = safe_float(data.get("total_amount"), 0.0)
+
+    if total_amount <= 0 and amount > 0:
+        total_amount = amount + tax
+    elif amount <= 0 and total_amount > 0:
+        amount = max(0.0, total_amount - tax)
+
     description = data.get("description", "")
-    due_date = data.get("due_date")
-    status = data.get("status", "draft")
+    due_date = parse_clean_date(data.get("due_date"))
+    status = sanitize_status(data.get("status"))
+    file_name = data.get("file_name")
+    provided_inv_num = data.get("invoice_number")
+    items = data.get("items") or data.get("line_items") or []
 
-    if not client_name or amount <= 0:
-        return jsonify({"error": "Client name and valid amount are required"}), 400
-
-    total_amount = amount + tax
+    if not client_name or total_amount <= 0:
+        return jsonify({"error": "Client/Vendor name and a valid total amount are required"}), 400
 
     ai_result = categorize(f"{description} {client_name}")
+    ai_cat_name = data.get("ai_category") or ai_result["category"]
+    ai_conf = data.get("ai_confidence") or ai_result["confidence"]
 
     conn = get_db()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 "SELECT id FROM categories WHERE name = %s LIMIT 1",
-                (ai_result["category"],)
+                (ai_cat_name,)
             )
             cat = cursor.fetchone()
             category_id = cat["id"] if cat else None
 
-            invoice_number = generate_invoice_number()
+            invoice_number = provided_inv_num if (provided_inv_num and str(provided_inv_num).strip().lower() not in ("not detected", "none", "null", "")) else generate_invoice_number()
+
+            # Duplicate check
+            cursor.execute(
+                "SELECT id FROM invoices WHERE invoice_number = %s AND user_id = %s LIMIT 1",
+                (invoice_number, user_id)
+            )
+            if cursor.fetchone():
+                if provided_inv_num:
+                    invoice_number = f"{invoice_number}-{random.randint(100, 999)}"
+                else:
+                    invoice_number = generate_invoice_number()
+
             cursor.execute("""
                 INSERT INTO invoices
                 (user_id, invoice_number, client_name, client_email, amount, tax, total_amount,
-                status, category_id, description, due_date, ai_category, ai_confidence)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                status, category_id, description, due_date, file_name, ai_category, ai_confidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 user_id, invoice_number, client_name,
                 data.get("client_email", ""),
                 amount, tax, total_amount,
                 status, category_id, description, due_date,
-                ai_result["category"], ai_result["confidence"]
+                file_name, ai_cat_name, ai_conf
             ))
-            conn.commit()
             new_id = cursor.lastrowid
+
+            # Insert line items if present
+            for item in items:
+                desc = str(item.get("description") or "Line item").strip()
+                qty = safe_float(item.get("quantity"), 1.0)
+                u_price = safe_float(item.get("unit_price"), 0.0)
+                tot = safe_float(item.get("total") or item.get("total_price"), qty * u_price)
+                cursor.execute("""
+                    INSERT INTO invoice_items (invoice_id, description, quantity, unit_price, total_price)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (new_id, desc, qty, u_price, tot))
+
+            conn.commit()
 
             cursor.execute("""
                 SELECT i.*, c.name as category_name, c.color as category_color
@@ -143,7 +245,15 @@ def create_invoice():
             """, (new_id,))
             invoice = cursor.fetchone()
 
-        return jsonify({"message": "Invoice created", "invoice": serialize_invoice(invoice)}), 201
+            if invoice:
+                cursor.execute("SELECT * FROM invoice_items WHERE invoice_id = %s", (new_id,))
+                invoice["items"] = cursor.fetchall()
+
+        return jsonify({"message": "Invoice saved successfully", "invoice": serialize_invoice(invoice)}), 201
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error saving invoice: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to save invoice record: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -162,8 +272,11 @@ def get_invoice(invoice_id):
             """, (invoice_id, user_id))
             invoice = cursor.fetchone()
 
-        if not invoice:
-            return jsonify({"error": "Invoice not found"}), 404
+            if not invoice:
+                return jsonify({"error": "Invoice not found"}), 404
+
+            cursor.execute("SELECT * FROM invoice_items WHERE invoice_id = %s", (invoice_id,))
+            invoice["items"] = cursor.fetchall()
 
         return jsonify({"invoice": serialize_invoice(invoice)}), 200
     finally:
@@ -179,51 +292,69 @@ def update_invoice(invoice_id):
     conn = get_db()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT id FROM invoices WHERE id=%s AND user_id=%s",
-                (invoice_id, user_id)
-            )
+            cursor.execute("SELECT id FROM invoices WHERE id = %s AND user_id = %s", (invoice_id, user_id))
             if not cursor.fetchone():
                 return jsonify({"error": "Invoice not found"}), 404
 
-            allowed = ["client_name", "client_email", "amount", "tax", "status", "description", "due_date"]
-            updates = {k: v for k, v in data.items() if k in allowed}
+            fields = []
+            params = []
+            for col in ["client_name", "client_email", "description", "ai_category"]:
+                if col in data:
+                    fields.append(f"{col} = %s")
+                    params.append(data[col])
 
-            if "status" in updates and updates["status"] not in ['draft', 'sent', 'paid', 'overdue', 'cancelled']:
-                return jsonify({"error": "Invalid status value"}), 400
+            if "status" in data:
+                fields.append("status = %s")
+                params.append(sanitize_status(data["status"]))
 
-            if "amount" in updates:
-                try:
-                    amt_val = float(updates["amount"])
-                    if amt_val <= 0:
-                        return jsonify({"error": "Amount must be greater than zero"}), 400
-                    updates["amount"] = amt_val
-                except (ValueError, TypeError):
-                    return jsonify({"error": "Invalid amount value"}), 400
+            if "due_date" in data:
+                fields.append("due_date = %s")
+                params.append(parse_clean_date(data["due_date"]))
 
-            if "amount" in updates or "tax" in updates:
-                cursor.execute("SELECT amount, tax FROM invoices WHERE id=%s AND user_id=%s", (invoice_id, user_id))
-                current = cursor.fetchone()
-                amt = float(updates.get("amount", current["amount"]))
-                tax = float(updates.get("tax", current["tax"]))
-                updates["total_amount"] = amt + tax
+            if "amount" in data:
+                fields.append("amount = %s")
+                params.append(safe_float(data["amount"]))
+            if "tax" in data:
+                fields.append("tax = %s")
+                params.append(safe_float(data["tax"]))
+            if "total_amount" in data:
+                fields.append("total_amount = %s")
+                params.append(safe_float(data["total_amount"]))
 
-            if updates:
-                set_clause = ", ".join(f"{k} = %s" for k in updates)
-                cursor.execute(
-                    f"UPDATE invoices SET {set_clause} WHERE id=%s AND user_id=%s",
-                    (*updates.values(), invoice_id, user_id)
-                )
-                conn.commit()
+            if fields:
+                params.extend([invoice_id, user_id])
+                cursor.execute(f"UPDATE invoices SET {', '.join(fields)} WHERE id = %s AND user_id = %s", params)
+
+            if "items" in data and isinstance(data["items"], list):
+                cursor.execute("DELETE FROM invoice_items WHERE invoice_id = %s", (invoice_id,))
+                for item in data["items"]:
+                    desc = str(item.get("description") or "Line item").strip()
+                    qty = safe_float(item.get("quantity"), 1.0)
+                    u_price = safe_float(item.get("unit_price"), 0.0)
+                    tot = safe_float(item.get("total") or item.get("total_price"), qty * u_price)
+                    cursor.execute("""
+                        INSERT INTO invoice_items (invoice_id, description, quantity, unit_price, total_price)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (invoice_id, desc, qty, u_price, tot))
+
+            conn.commit()
 
             cursor.execute("""
                 SELECT i.*, c.name as category_name, c.color as category_color
                 FROM invoices i LEFT JOIN categories c ON i.category_id = c.id
-                WHERE i.id=%s AND i.user_id=%s
-            """, (invoice_id, user_id))
+                WHERE i.id = %s
+            """, (invoice_id,))
             invoice = cursor.fetchone()
 
+            if invoice:
+                cursor.execute("SELECT * FROM invoice_items WHERE invoice_id = %s", (invoice_id,))
+                invoice["items"] = cursor.fetchall()
+
         return jsonify({"message": "Invoice updated", "invoice": serialize_invoice(invoice)}), 200
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating invoice: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to update invoice: {str(e)}"}), 500
     finally:
         conn.close()
 
@@ -235,14 +366,20 @@ def delete_invoice(invoice_id):
     conn = get_db()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT id FROM invoices WHERE id=%s AND user_id=%s",
-                (invoice_id, user_id)
-            )
-            if not cursor.fetchone():
+            cursor.execute("SELECT file_name FROM invoices WHERE id = %s AND user_id = %s", (invoice_id, user_id))
+            invoice = cursor.fetchone()
+            if not invoice:
                 return jsonify({"error": "Invoice not found"}), 404
 
-            cursor.execute("DELETE FROM invoices WHERE id=%s AND user_id=%s", (invoice_id, user_id))
+            if invoice.get("file_name"):
+                f_path = os.path.join(UPLOAD_FOLDER, invoice["file_name"])
+                if os.path.exists(f_path):
+                    try:
+                        os.remove(f_path)
+                    except Exception:
+                        pass
+
+            cursor.execute("DELETE FROM invoices WHERE id = %s AND user_id = %s", (invoice_id, user_id))
             conn.commit()
 
         return jsonify({"message": "Invoice deleted"}), 200
@@ -254,311 +391,99 @@ def delete_invoice(invoice_id):
 @jwt_required()
 def upload_invoice():
     """
-    Upload invoice image/PDF, permanently store the file,
-    run OCR, and save only verified OCR data.
+    Upload invoice image, PDF, or Word (DOC/DOCX) file, store permanently,
+    run OCR & AI extraction pipeline, validate, generate insights, and return structured payload.
     """
-
     user_id = get_jwt_identity()
 
-    # ============================================================
-    # 1. CHECK FILE
-    # ============================================================
-
     if "file" not in request.files:
-        return jsonify({
-            "error": "No file part. Use field name 'file'"
-        }), 400
+        return jsonify({"error": "No file part in request. Use form field name 'file'"}), 400
 
     file = request.files["file"]
-
     if not file.filename:
-        return jsonify({
-            "error": "No file selected"
-        }), 400
+        return jsonify({"error": "No file selected"}), 400
 
     if not allowed_file(file.filename):
         return jsonify({
-            "error": "Invalid file type. Allowed: PDF, PNG, JPG, JPEG, TIFF, BMP, WEBP"
+            "error": "Invalid file format. Supported formats: PDF, PNG, JPG, JPEG, TIFF, BMP, WEBP, DOC, DOCX"
         }), 400
 
     filename = secure_filename(file.filename)
-
     ext = filename.rsplit(".", 1)[1].lower()
 
-    # ============================================================
-    # 2. CREATE UNIQUE PERMANENT FILE NAME
-    # ============================================================
-
-    unique_filename = (
-        f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_"
-        f"{filename}"
-    )
-
-    permanent_path = os.path.join(
-        UPLOAD_FOLDER,
-        unique_filename
-    )
-
-    # ============================================================
-    # 3. SAVE UPLOADED FILE PERMANENTLY
-    # ============================================================
+    # Create unique permanent filename
+    unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{filename}"
+    permanent_path = os.path.join(UPLOAD_FOLDER, unique_filename)
 
     try:
-
         file.save(permanent_path)
-
     except Exception as e:
-
-        return jsonify({
-            "error": "Could not save uploaded file",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": "Could not save uploaded document file", "details": str(e)}), 500
 
     try:
+        from routes.ocr import process_document_extraction
 
-        # ========================================================
-        # 4. RUN OCR & LOG RESULTS
-        # ========================================================
-
-        from routes.ocr import extract_invoice_data_from_file
-
-        extracted, extraction_method = extract_invoice_data_from_file(
+        result = process_document_extraction(
             permanent_path,
-            filename
+            filename,
+            user_id=user_id
         )
 
-        print(f"\n[INVOICE UPLOAD LOG] File: {filename} | Method: {extraction_method}", flush=True)
-        print(f"[INVOICE UPLOAD LOG] Raw Text: {extracted.get('raw_text', '')[:500]}", flush=True)
-        print(f"[INVOICE UPLOAD LOG] Parsed Fields: {extracted}\n", flush=True)
+        extracted_text = result.get("extracted_text", "")
+        invoice_obj = result.get("invoice", {})
+        insights_obj = result.get("insights", {})
+        validations_list = result.get("validations", [])
+        method = result.get("extraction_method", "unknown")
+
+        logger.info(f"[INVOICE UPLOAD LOG] File: {filename} | Method: {method} | Characters Extracted: {len(extracted_text)}")
+
+        # Build comprehensive output compatible with Requirement 7 and existing UI components
+        extracted_data_compat = {
+            "vendor": invoice_obj.get("vendor", {}).get("name"),
+            "vendor_address": invoice_obj.get("vendor", {}).get("address"),
+            "vendor_tax_id": invoice_obj.get("vendor", {}).get("tax_id"),
+            "customer": invoice_obj.get("customer", {}).get("name"),
+            "customer_address": invoice_obj.get("customer", {}).get("address"),
+            "customer_tax_id": invoice_obj.get("customer", {}).get("tax_id"),
+            "invoice_number": invoice_obj.get("invoice_number"),
+            "date": invoice_obj.get("invoice_date"),
+            "due_date": invoice_obj.get("due_date"),
+            "subtotal": invoice_obj.get("subtotal"),
+            "tax": invoice_obj.get("tax_amount"),
+            "discount": invoice_obj.get("discount_amount", 0.0),
+            "total_amount": invoice_obj.get("total_amount"),
+            "currency": invoice_obj.get("currency", "INR"),
+            "payment_status": invoice_obj.get("payment_status", "Unknown"),
+            "line_items": invoice_obj.get("items", []),
+            "raw_text": extracted_text,
+            "structured_data": invoice_obj,
+            "validations": validations_list,
+            "insights": insights_obj
+        }
 
         return jsonify({
-            "message": "Invoice document uploaded and OCR data extracted successfully",
-            "requires_review": extracted.get("requires_review", False),
-            "needs_manual_review": extracted.get("needs_manual_review", False),
-            "extracted_data": extracted,
+            "success": True,
+            "filename": filename,
+            "extracted_text": extracted_text,
+            "invoice": invoice_obj,
+            "insights": insights_obj,
+            "validations": validations_list,
             "file_name": unique_filename,
             "file_url": f"/api/uploads/{unique_filename}",
-            "extraction_method": extraction_method
+            "extraction_method": method,
+            "extracted_data": extracted_data_compat,
+            "structured_data": invoice_obj
         }), 200
 
-        client_name = vendor
-
-        description = (
-            f"Uploaded invoice: {filename}"
-        )
-
-        # ========================================================
-        # 9. AI CATEGORY
-        # ========================================================
-
-        ai_category = extracted.get(
-            "ai_category"
-        )
-
-        ai_confidence = extracted.get(
-            "ai_confidence"
-        )
-
-        if not ai_category:
-
-            ai_result = categorize(
-                f"{description} {client_name}"
-            )
-
-            ai_category = ai_result[
-                "category"
-            ]
-
-            ai_confidence = ai_result[
-                "confidence"
-            ]
-
-        # ========================================================
-        # 10. DATABASE
-        # ========================================================
-
-        conn = get_db()
-
-        try:
-
-            with conn.cursor() as cursor:
-
-                # ----------------------------------------------
-                # Duplicate invoice number
-                # ----------------------------------------------
-
-                cursor.execute(
-                    """
-                    SELECT id
-                    FROM invoices
-                    WHERE invoice_number = %s
-                    LIMIT 1
-                    """,
-                    (invoice_number,)
-                )
-
-                if cursor.fetchone():
-
-                    extracted[
-                        "requires_review"
-                    ] = True
-
-                    extracted[
-                        "needs_manual_review"
-                    ] = True
-
-                    extracted[
-                        "manual_review_reason"
-                    ] = (
-                        f"Invoice number "
-                        f"'{invoice_number}' "
-                        f"already exists."
-                    )
-
-                    return jsonify({
-                        "message": (
-                            "Duplicate invoice number. "
-                            "Manual review required."
-                        ),
-                        "requires_review": True,
-                        "needs_manual_review": True,
-                        "extracted_data": extracted,
-                        "file_name": unique_filename,
-                        "file_url": f"/api/uploads/{unique_filename}",
-                        "extraction_method": extraction_method
-                    }), 422
-
-                cursor.execute(
-                    """
-                    SELECT id
-                    FROM categories
-                    WHERE name = %s
-                    LIMIT 1
-                    """,
-                    (ai_category,)
-                )
-
-                category = cursor.fetchone()
-
-                category_id = (
-                    category["id"]
-                    if category
-                    else None
-                )
-
-                # ----------------------------------------------
-                # INSERT
-                # ----------------------------------------------
-
-                cursor.execute(
-                    """
-                    INSERT INTO invoices
-                    (
-                        user_id,
-                        invoice_number,
-                        client_name,
-                        client_email,
-                        amount,
-                        tax,
-                        total_amount,
-                        status,
-                        category_id,
-                        description,
-                        due_date,
-                        file_name,
-                        ai_category,
-                        ai_confidence
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s
-                    )
-                    """,
-                    (
-                        user_id,
-                        invoice_number,
-                        client_name,
-                        "",
-                        amount,
-                        tax,
-                        total_amount,
-                        "draft",
-                        category_id,
-                        description,
-                        due_date,
-                        unique_filename,
-                        ai_category,
-                        ai_confidence
-                    )
-                )
-
-                conn.commit()
-
-                new_id = cursor.lastrowid
-
-                # ----------------------------------------------
-                # Fetch saved invoice
-                # ----------------------------------------------
-
-                cursor.execute(
-                    """
-                    SELECT
-                        i.*,
-                        c.name AS category_name,
-                        c.color AS category_color
-                    FROM invoices i
-                    LEFT JOIN categories c
-                        ON i.category_id = c.id
-                    WHERE i.id = %s
-                    AND i.user_id = %s
-                    """,
-                    (
-                        new_id,
-                        user_id
-                    )
-                )
-
-                invoice = cursor.fetchone()
-
-        finally:
-
-            conn.close()
-
-        # ========================================================
-        # 11. RETURN
-        # ========================================================
-
-        return jsonify({
-            "message": (
-                "Invoice uploaded and processed successfully"
-            ),
-            "invoice": serialize_invoice(
-                invoice
-            ),
-            "extracted_data": extracted,
-            "requires_review": False,
-            "needs_manual_review": False,
-            "file_name": unique_filename,
-            "file_url": f"/api/uploads/{unique_filename}",
-            "extraction_method": extraction_method
-        }), 201
-
     except Exception as e:
-
-        # If processing fails, remove the permanent file
-        # so broken uploads are not left behind.
-
-        try:
-            if os.path.exists(
-                permanent_path
-            ):
-                os.remove(
-                    permanent_path
-                )
-        except Exception:
-            pass
-
+        if os.path.exists(permanent_path):
+            try:
+                os.remove(permanent_path)
+            except Exception:
+                pass
+        logger.error(f"Invoice processing error: {e}", exc_info=True)
         return jsonify({
-            "error": "Invoice processing failed",
+            "success": False,
+            "error": "OCR failed: Unable to process image or document",
             "details": str(e)
         }), 500

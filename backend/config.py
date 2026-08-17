@@ -54,5 +54,5 @@ class Config:
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024
     ALLOWED_EXTENSIONS = {
         "pdf", "png", "jpg", "jpeg",
-        "tiff", "bmp", "webp"
+        "tiff", "bmp", "webp", "doc", "docx"
     }

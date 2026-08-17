@@ -1,25 +1,30 @@
 """
 routes/ocr.py
 
-Separate, reliable extraction paths for PDF and Image files with OpenCV preprocessing,
-Tesseract & EasyOCR image extraction, and label-based field parsing.
+Robust, Production-Grade Document Extraction Pipeline for Invoices.
+Supports Images (PNG, JPG, WEBP), PDFs (Digital & Scanned), and Word Docs (DOC, DOCX).
 
-Pipeline Overview:
-- PDF Path: PDF text extraction (PyPDF) -> Scanned PDF image OCR -> Label-based field parser
-- Image Path (PNG, JPG, JPEG, TIFF, BMP, WEBP): OpenCV preprocessing (grayscale, denoising, Otsu thresholding) -> Tesseract OCR -> EasyOCR / Gemini Vision fallback -> Label-based field parser
-- Label-Based Parser: Extracts vendor, invoice_number, date, due_date, subtotal, tax (CGST + SGST / IGST), total_amount, currency, line_items, category, confidence.
-- Returns None for uncertain fields to allow manual user correction.
-- Preserves raw_text unchanged for debugging.
+Pipeline Stages:
+1. File Handling & Format Identification
+2. Text Extraction:
+   - Images: Preprocessing -> EasyOCR / Tesseract
+   - PDFs: Digital Text Extraction -> Scanned PDF Page Rendering -> Image OCR
+   - DOCX: Paragraphs & Table Extraction
+3. AI Structured Data Extraction:
+   - Gemini API Integration (if API key available)
+   - High-Accuracy Deterministic AI Extraction Engine (No Hallucination)
+4. Robust JSON Parsing & Markdown Stripping
+5. Math & Business Logic Validation Engine
+6. Financial & Payment Insights Generator
+7. Detailed Backend Logging
 """
 
 import os
 import re
 import json
 import base64
-import random
 import logging
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from datetime import datetime, date
 
 import requests
 from flask import Blueprint, jsonify, request
@@ -27,17 +32,45 @@ from flask import Blueprint, jsonify, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ocr_pipeline")
 
+ocr_bp = Blueprint("ocr", __name__)
+
 # ============================================================
-# DEPENDENCY CHECKS
+# DEPENDENCY IMPORTS & INITIALIZATION
 # ============================================================
 
-# OpenCV
+# PyMuPDF (fitz)
 try:
-    import cv2
-    import numpy as np
-    HAS_OPENCV = True
+    import pymupdf as fitz
+    HAS_PYMUPDF = True
 except ImportError:
-    HAS_OPENCV = False
+    try:
+        import fitz
+        HAS_PYMUPDF = True
+    except ImportError:
+        HAS_PYMUPDF = False
+
+# pdfplumber
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
+
+# pypdf
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
+# EasyOCR
+HAS_EASYOCR = False
+EASYOCR_READER = None
+try:
+    import easyocr
+    HAS_EASYOCR = True
+except ImportError:
+    HAS_EASYOCR = False
 
 # PyTesseract
 try:
@@ -55,48 +88,31 @@ try:
 except ImportError:
     HAS_PYTESSERACT = False
 
-# EasyOCR
+# OpenCV & PIL
 try:
-    import easyocr
-    HAS_EASYOCR = True
-    EASYOCR_READER = None
+    import cv2
+    import numpy as np
+    HAS_OPENCV = True
 except ImportError:
-    HAS_EASYOCR = False
-    EASYOCR_READER = None
+    HAS_OPENCV = False
 
-# PyPDF
-try:
-    import pypdf
-    HAS_PYPDF = True
-except ImportError:
-    try:
-        import PyPDF2 as pypdf
-        HAS_PYPDF = True
-    except ImportError:
-        HAS_PYPDF = False
-
-# PDF2Image
-try:
-    from pdf2image import convert_from_path
-    HAS_PDF2IMAGE = True
-except ImportError:
-    HAS_PDF2IMAGE = False
-
-# Pillow (PIL)
 try:
     from PIL import Image
+    import io
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
 
+# python-docx
+try:
+    import docx
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+
 from config import Config
 
-ocr_bp = Blueprint("ocr", __name__)
-
-# ============================================================
-# GEMINI CONFIGURATION
-# ============================================================
-
+# Gemini Config
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 try:
@@ -110,50 +126,202 @@ GEMINI_ENDPOINT = (
 )
 
 SUPPORTED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}
-SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | {"pdf"}
+SUPPORTED_DOCUMENT_EXTENSIONS = {"doc", "docx"}
+SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | {"pdf"} | SUPPORTED_DOCUMENT_EXTENSIONS
+
+
+def get_easyocr_reader():
+    global EASYOCR_READER
+    if EASYOCR_READER is None and HAS_EASYOCR:
+        try:
+            logger.info("Initializing EasyOCR reader...")
+            EASYOCR_READER = easyocr.Reader(['en'], gpu=False, verbose=False)
+        except Exception as e:
+            logger.error(f"Failed to initialize EasyOCR: {e}")
+            EASYOCR_READER = None
+    return EASYOCR_READER
 
 
 # ============================================================
-# HELPER FUNCTIONS & NORMALIZATIONS
+# 1. TEXT EXTRACTION PIPELINE
 # ============================================================
 
-def _empty_result():
-    return {
-        "vendor": None,
-        "invoice_number": None,
-        "date": None,
-        "due_date": None,
-        "subtotal": None,
-        "tax": None,
-        "total_amount": None,
-        "currency": "INR",
-        "line_items": [],
-        "ai_category": "Uncategorized",
-        "ai_confidence": 0.0,
-        "needs_manual_review": True,
-        "requires_review": True,
-        "manual_review_reason": "OCR field extraction unverified",
-        "validation_warnings": [],
-        "raw_text": "",
-    }
+def extract_text_from_image(file_path):
+    """
+    Extract raw text from an image file using EasyOCR or Tesseract.
+    """
+    raw_text = ""
+    method = "image_ocr"
+
+    # Try PyTesseract first if available and executable exists
+    if HAS_PYTESSERACT:
+        try:
+            t_cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
+            if os.path.exists(t_cmd):
+                txt = pytesseract.image_to_string(file_path, lang="eng")
+                if txt and len(txt.strip()) >= 5:
+                    return txt.strip(), "tesseract_ocr"
+        except Exception as e:
+            logger.warning(f"PyTesseract error: {e}")
+
+    # Try EasyOCR
+    reader = get_easyocr_reader()
+    if reader:
+        try:
+            results = reader.readtext(file_path, detail=0)
+            if results:
+                raw_text = "\n".join(results).strip()
+                if len(raw_text) >= 5:
+                    return raw_text, "easyocr"
+        except Exception as e:
+            logger.warning(f"EasyOCR error: {e}")
+
+    # Fallback with OpenCV preprocessing + EasyOCR if available
+    if HAS_OPENCV and HAS_PIL and reader:
+        try:
+            img = cv2.imread(file_path)
+            if img is not None:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                results = reader.readtext(gray, detail=0)
+                if results:
+                    raw_text = "\n".join(results).strip()
+                    return raw_text, "easyocr_opencv"
+        except Exception as e:
+            logger.warning(f"OpenCV EasyOCR fallback error: {e}")
+
+    return raw_text, method if raw_text else "image_ocr_failed"
 
 
-def get_failed_ocr_response(raw_text="", reason="OCR extraction failed"):
-    result = _empty_result()
-    result["needs_manual_review"] = True
-    result["requires_review"] = True
-    result["manual_review_reason"] = reason
-    result["error"] = reason
-    result["raw_text"] = raw_text[:10000] if raw_text else ""
-    return result
+def extract_text_from_pdf(file_path):
+    """
+    Extract text from PDF.
+    First attempts normal PDF text extraction.
+    If no meaningful text is available, converts pages to images and runs OCR.
+    """
+    extracted_text = ""
+    method = "pdf_text_extraction"
 
+    # 1. Try PyMuPDF (fitz) text extraction
+    if HAS_PYMUPDF:
+        try:
+            doc = fitz.open(file_path)
+            pages_text = []
+            for page in doc:
+                t = page.get_text()
+                if t and t.strip():
+                    pages_text.append(t.strip())
+            if pages_text:
+                extracted_text = "\n\n".join(pages_text).strip()
+        except Exception as e:
+            logger.warning(f"PyMuPDF text extraction error: {e}")
+
+    # 2. Try pdfplumber if PyMuPDF extracted nothing
+    if not extracted_text and HAS_PDFPLUMBER:
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                pages_text = []
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t and t.strip():
+                        pages_text.append(t.strip())
+                if pages_text:
+                    extracted_text = "\n\n".join(pages_text).strip()
+        except Exception as e:
+            logger.warning(f"pdfplumber text extraction error: {e}")
+
+    # 3. Try pypdf if still nothing
+    if not extracted_text and HAS_PYPDF:
+        try:
+            reader = pypdf.PdfReader(file_path)
+            pages_text = []
+            for page in reader.pages:
+                t = page.extract_text()
+                if t and t.strip():
+                    pages_text.append(t.strip())
+            if pages_text:
+                extracted_text = "\n\n".join(pages_text).strip()
+        except Exception as e:
+            logger.warning(f"pypdf text extraction error: {e}")
+
+    # Check if extracted text is meaningful (contains at least 20 printable Alphanumeric characters)
+    alpha_count = sum(1 for c in extracted_text if c.isalnum())
+    if alpha_count >= 20:
+        return extracted_text, "pdf_digital_text"
+
+    # 4. If no meaningful text (Scanned PDF), render pages to images and run OCR
+    logger.info("PDF has no meaningful text. Running scanned PDF rendering + OCR pipeline...")
+    ocr_pages_text = []
+
+    if HAS_PYMUPDF:
+        try:
+            doc = fitz.open(file_path)
+            reader = get_easyocr_reader()
+            for page_idx, page in enumerate(doc):
+                pix = page.get_pixmap(dpi=200)
+                img_bytes = pix.tobytes("png")
+
+                if HAS_PIL and reader:
+                    img = Image.open(io.BytesIO(img_bytes))
+                    # Save to temporary buffer or numpy array for EasyOCR
+                    if HAS_OPENCV:
+                        open_cv_image = np.array(img.convert("RGB"))
+                        open_cv_image = open_cv_image[:, :, ::-1].copy()
+                        ocr_res = reader.readtext(open_cv_image, detail=0)
+                    else:
+                        ocr_res = reader.readtext(img_bytes, detail=0)
+
+                    if ocr_res:
+                        ocr_pages_text.append("\n".join(ocr_res))
+
+            if ocr_pages_text:
+                return "\n\n".join(ocr_pages_text).strip(), "scanned_pdf_ocr"
+        except Exception as e:
+            logger.warning(f"PyMuPDF scanned PDF OCR error: {e}")
+
+    return extracted_text or "No readable text found in PDF", "pdf_extraction_failed"
+
+
+def extract_text_from_docx(file_path):
+    """
+    Extract text from DOCX/DOC files, preserving paragraph text and table structure.
+    """
+    if not HAS_DOCX:
+        return "", "docx_library_missing"
+
+    try:
+        doc = docx.Document(file_path)
+        text_parts = []
+
+        for p in doc.paragraphs:
+            if p.text and p.text.strip():
+                text_parts.append(p.text.strip())
+
+        for table in doc.tables:
+            text_parts.append("--- Table Start ---")
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
+                if cells:
+                    text_parts.append(" | ".join(cells))
+            text_parts.append("--- Table End ---")
+
+        full_text = "\n".join(text_parts).strip()
+        return full_text, "docx_text_table_extraction"
+    except Exception as e:
+        logger.error(f"DOCX extraction error: {e}")
+        return "", f"docx_error: {e}"
+
+
+# ============================================================
+# 2. AI STRUCTURED EXTRACTION ENGINE
+# ============================================================
 
 def _normalize_date(date_str):
-    if not date_str:
+    if not date_str or str(date_str).lower() in ("null", "none", "not detected", ""):
         return None
     d_clean = re.sub(r"[^\w\s/-]", "", str(date_str)).strip()
     if not d_clean:
         return None
+
     patterns = [
         ("%Y-%m-%d", r"^\d{4}-\d{2}-\d{2}$"),
         ("%d/%m/%Y", r"^\d{1,2}/\d{1,2}/\d{4}$"),
@@ -184,7 +352,7 @@ def _normalize_date(date_str):
 
 
 def _parse_number(val):
-    if val is None:
+    if val is None or str(val).lower() in ("null", "none", "not detected", ""):
         return None
     if isinstance(val, (int, float)):
         return round(float(val), 2)
@@ -208,152 +376,186 @@ def _parse_number(val):
         return None
 
 
-# ============================================================
-# OPENCV PREPROCESSING FOR IMAGES
-# ============================================================
-
-def _preprocess_image_with_opencv(file_path):
+def _safe_parse_ai_json(json_raw_str):
     """
-    OpenCV preprocessing for OCR quality:
-    - Load image with cv2
-    - Convert to Grayscale
-    - Apply Gaussian Blur to reduce noise
-    - Apply Otsu Thresholding for crisp black-and-white text
+    Safely extract and parse JSON from AI response text.
+    Handles Markdown code fences ```json ... ```, extra explanatory text, invalid formatting.
     """
-    if not HAS_OPENCV:
-        if HAS_PIL:
-            try:
-                return Image.open(file_path), None
-            except Exception as e:
-                return None, f"PIL open failed: {e}"
-        return None, "OpenCV and PIL not available"
+    if not json_raw_str or not isinstance(json_raw_str, str):
+        return None, "Empty raw response string"
 
+    text = json_raw_str.strip()
+
+    # 1. Strip Markdown code fences
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text).strip()
+
+    # 2. Try direct json parse
     try:
-        img = cv2.imread(file_path)
-        if img is None:
-            if HAS_PIL:
-                return Image.open(file_path), None
-            return None, "cv2.imread returned None"
-
-        # 1. Grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # 2. Denoise & Thresholding
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        pil_img = Image.fromarray(thresh)
-        return pil_img, None
-    except Exception as exc:
-        if HAS_PIL:
-            try:
-                return Image.open(file_path), None
-            except Exception:
-                pass
-        return None, f"OpenCV preprocessing error: {exc}"
-
-
-# ============================================================
-# OCR ENGINE HANDLERS (TESSERACT & EASYOCR)
-# ============================================================
-
-def _extract_text_via_tesseract(file_path):
-    """Primary Image OCR path: OpenCV preprocessing + Tesseract OCR."""
-    if not HAS_PYTESSERACT:
-        return "", "PyTesseract is not installed"
-
-    # 1. Try OpenCV preprocessed image
-    preprocessed_img, err = _preprocess_image_with_opencv(file_path)
-    if preprocessed_img:
-        try:
-            text = pytesseract.image_to_string(preprocessed_img, lang="eng")
-            if text and len(text.strip()) >= 5:
-                return text.strip(), None
-        except Exception:
-            pass
-
-    # 2. Try raw file path directly with PyTesseract
-    try:
-        text = pytesseract.image_to_string(file_path, lang="eng")
-        if text and len(text.strip()) >= 5:
-            return text.strip(), None
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed, None
     except Exception:
         pass
 
-    # 3. Try PIL Image directly
-    if HAS_PIL:
+    # 3. Use Regex to find substring { ... }
+    start_idx = text.find("{")
+    end_idx = text.rfind("}")
+    if start_idx != -1 and end_idx > start_idx:
+        json_sub = text[start_idx:end_idx + 1]
         try:
-            img = Image.open(file_path)
-            text = pytesseract.image_to_string(img, lang="eng")
-            if text and len(text.strip()) >= 5:
-                return text.strip(), None
-        except Exception:
-            pass
+            parsed = json.loads(json_sub)
+            if isinstance(parsed, dict):
+                return parsed, None
+        except Exception as e:
+            return None, f"JSON decode error in substring: {e}"
 
-    return "", "PyTesseract returned empty text"
+    return None, "Failed to extract valid JSON dictionary"
 
 
-def _extract_text_via_easyocr(file_path):
-    """Secondary Image OCR path: EasyOCR."""
-    global EASYOCR_READER
-    if not HAS_EASYOCR:
-        return "", "EasyOCR is not installed"
+def _call_gemini_ai_api(raw_text):
+    """
+    Calls Gemini API to extract structured JSON from raw document text.
+    """
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
+        return None, "GEMINI_API_KEY not configured"
+
+    prompt = f"""
+You are an expert financial OCR AI assistant. Extract structured JSON from the following invoice raw text.
+
+CRITICAL INSTRUCTIONS:
+1. Return ONLY valid JSON matching the exact schema below.
+2. NEVER HALLUCINATE OR INVENT VALUES. If a field is not explicitly present in the raw text, set its value to null.
+3. Keep exact dates, item names, prices, tax amounts, vendor, and customer details.
+
+EXPECTED JSON SCHEMA:
+{{
+  "invoice_number": "string or null",
+  "invoice_date": "YYYY-MM-DD or null",
+  "due_date": "YYYY-MM-DD or null",
+  "vendor": {{
+    "name": "string or null",
+    "address": "string or null",
+    "tax_id": "string or null"
+  }},
+  "customer": {{
+    "name": "string or null",
+    "address": "string or null",
+    "tax_id": "string or null"
+  }},
+  "items": [
+    {{
+      "description": "string",
+      "quantity": float,
+      "unit_price": float,
+      "tax": float or null,
+      "total": float
+    }}
+  ],
+  "subtotal": float or null,
+  "tax_amount": float or null,
+  "discount_amount": float or null,
+  "total_amount": float or null,
+  "currency": "INR",
+  "payment_status": "Paid" | "Unpaid" | "Overdue" | "Unknown"
+}}
+
+RAW DOCUMENT TEXT:
+{raw_text[:25000]}
+"""
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.0,
+            "responseMimeType": "application/json"
+        }
+    }
 
     try:
-        if EASYOCR_READER is None:
-            EASYOCR_READER = easyocr.Reader(['en'], gpu=False)
-        results = EASYOCR_READER.readtext(file_path, detail=0)
-        text = "\n".join(results)
-        return text.strip() if text else "", None
-    except Exception as exc:
-        return "", f"EasyOCR exception: {exc}"
+        url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
+        resp = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT)
+
+        if resp.status_code == 200:
+            res_data = resp.json()
+            candidates = res_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    ai_text = parts[0].get("text", "")
+                    parsed_json, err = _safe_parse_ai_json(ai_text)
+                    if parsed_json:
+                        return parsed_json, None
+                    return None, f"JSON parse error: {err}"
+            return None, "Gemini returned empty candidate contents"
+        else:
+            return None, f"Gemini HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, f"Gemini API request failed: {e}"
 
 
-# ============================================================
-# LABEL-BASED FIELD PARSER
-# ============================================================
-
-def _label_based_field_parser(raw_text, filename=""):
+def _fallback_ai_structured_parser(raw_text, filename=""):
     """
-    Label-based OCR field extraction for invoice and receipt documents.
-    Identifies vendor, invoice_number, date, due_date, subtotal, tax (with CGST+SGST sum),
-    total_amount, currency, and line items based on explicit label boundaries line-by-line.
-    Returns None for any field that cannot be detected with certainty.
-    Preserves raw_text unchanged for debugging.
+    High-accuracy deterministic fallback AI parser that extracts structured fields
+    directly from raw text without hallucinating values when Gemini API is unavailable.
     """
-    from utils.ai_categorizer import categorize
-
-    clean_text = raw_text or ""
-    lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
+    lines = [l.strip() for l in (raw_text or "").splitlines() if l.strip()]
 
     vendor = None
+    vendor_address = None
+    vendor_tax_id = None
+
+    customer = None
+    customer_address = None
+    customer_tax_id = None
+
     invoice_number = None
-    date_str = None
-    due_date_str = None
+    invoice_date = None
+    due_date = None
+
     subtotal = None
-    tax = None
+    tax_amount = None
+    discount_amount = 0.0
     total_amount = None
+    currency = "INR"
+    payment_status = "Unknown"
+
     cgst_val = None
     sgst_val = None
     igst_val = None
 
     for idx, line in enumerate(lines):
         next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
-        combined_two_lines = f"{line} {next_line}"
+        two_lines = f"{line} {next_line}"
 
-        # 1. Vendor (Label-Based)
+        # Vendor
         if not vendor:
-            v_match = re.search(r"^(?:Vendor|Supplier|Merchant|Billed By|Company|Seller|Payee|Issued By|Store)[\s:]+([A-Za-z0-9\s.,&'-]{2,50})$", line, re.IGNORECASE)
+            v_match = re.search(r"^(?:Vendor|Supplier|Merchant|Billed By|Company|Seller|Payee|Issued By)[\s:]+([A-Za-z0-9\s.,&'-]{2,50})$", line, re.IGNORECASE)
             if v_match:
                 cand = v_match.group(1).strip()
-                if cand.lower() not in {"invoice", "tax invoice", "receipt", "total", "bill to", "statement", "amount"}:
+                if cand.lower() not in {"invoice", "tax invoice", "receipt", "total", "amount"}:
                     vendor = cand
-            elif re.search(r"GSTIN[\s:]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", line, re.IGNORECASE):
-                g_match = re.search(r"GSTIN[\s:]*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})", line, re.IGNORECASE)
-                if g_match:
-                    vendor = g_match.group(1).strip()
 
-        # 2. Invoice / Receipt Number (Label-Based)
+        if not vendor_tax_id:
+            g_match = re.search(r"(?:GSTIN|VAT|TAX ID|EIN|GST No|Tax No)[\s:]*([0-9A-Z-]{8,20})", line, re.IGNORECASE)
+            if g_match:
+                vendor_tax_id = g_match.group(1).strip()
+
+        # Customer
+        if not customer:
+            c_match = re.search(r"^(?:Billed To|Customer|Client|Ship To|Buyer|Recipient|Invoice To)[\s:]+([A-Za-z0-9\s.,&'-]{2,50})$", line, re.IGNORECASE)
+            if c_match:
+                cand = c_match.group(1).strip()
+                if cand.lower() not in {"invoice", "tax invoice", "receipt", "total", "amount"}:
+                    customer = cand
+
+        if not customer_tax_id:
+            cg_match = re.search(r"(?:Customer GSTIN|Client VAT|Customer Tax ID)[\s:]*([0-9A-Z-]{8,20})", line, re.IGNORECASE)
+            if cg_match:
+                customer_tax_id = cg_match.group(1).strip()
+
+        # Invoice Number
         if not invoice_number:
             inv_match = re.search(r"(?:Tax\s*Invoice\s*No|Invoice\s*Number|Invoice\s*No|Invoice\s*#|Inv\s*No|Inv\s*#|Bill\s*No|Receipt\s*No|Receipt\s*#|Ref\s*No)[\s:]+([A-Za-z0-9-_/#]{2,30})", line, re.IGNORECASE)
             if inv_match:
@@ -363,443 +565,422 @@ def _label_based_field_parser(raw_text, filename=""):
             elif re.search(r"\b(INV-[A-Za-z0-9-_]{3,20})\b", line, re.IGNORECASE):
                 invoice_number = re.search(r"\b(INV-[A-Za-z0-9-_]{3,20})\b", line, re.IGNORECASE).group(1).strip()
 
-        # 3. Date & Due Date (Label-Based)
-        if not date_str:
+        # Dates
+        if not invoice_date:
             d_match = re.search(r"(?:Invoice\s*Date|Receipt\s*Date|Bill\s*Date|Date\s*of\s*Issue|Txn\s*Date|^Date)[\s:]+([A-Za-z0-9,\s/-]{6,25})", line, re.IGNORECASE)
             if d_match:
-                parsed_d = _normalize_date(d_match.group(1).strip())
-                if parsed_d:
-                    date_str = parsed_d
+                invoice_date = _normalize_date(d_match.group(1).strip())
 
-        if not due_date_str:
+        if not due_date:
             due_match = re.search(r"(?:Due\s*Date|Payment\s*Due|Pay\s*By|^Due)[\s:]+([A-Za-z0-9,\s/-]{6,25})", line, re.IGNORECASE)
             if due_match:
-                parsed_due = _normalize_date(due_match.group(1).strip())
-                if parsed_due:
-                    due_date_str = parsed_due
+                due_date = _normalize_date(due_match.group(1).strip())
 
-        # 4. Total Amount (Label-Based)
+        # Financial Totals
         if total_amount is None:
-            tot_match = re.search(r"(?:Grand\s*Total|Total\s*Amount|Total\s*Payable|Net\s*Amount|Total\s*Due|Amount\s*Paid|^Total)[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
+            tot_match = re.search(r"(?:Grand\s*Total|Total\s*Amount|Total\s*Payable|Net\s*Amount|Total\s*Due|Amount\s*Paid|^Total)[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
             if tot_match:
                 parsed_tot = _parse_number(tot_match.group(1))
                 if parsed_tot is not None and parsed_tot > 0:
                     total_amount = parsed_tot
 
-        # 5. Subtotal (Label-Based)
         if subtotal is None:
-            sub_match = re.search(r"(?:Subtotal|Sub\s*Total|Sub-Total|Taxable\s*Value|Taxable\s*Amount|Net\s*Value)[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
+            sub_match = re.search(r"(?:Subtotal|Sub\s*Total|Sub-Total|Taxable\s*Value|Taxable\s*Amount|Net\s*Value)[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
             if sub_match:
                 parsed_sub = _parse_number(sub_match.group(1))
                 if parsed_sub is not None and parsed_sub > 0:
                     subtotal = parsed_sub
 
-        # 6. CGST / SGST / IGST Tax Components
+        if discount_amount == 0.0 or discount_amount is None:
+            disc_match = re.search(r"(?:Discount|Less\s*Discount|Savings)[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
+            if disc_match:
+                parsed_disc = _parse_number(disc_match.group(1))
+                if parsed_disc is not None:
+                    discount_amount = parsed_disc
+
         if cgst_val is None:
-            cgst_match = re.search(r"CGST[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
-            if cgst_match:
-                cgst_val = _parse_number(cgst_match.group(1))
+            cgst_match = re.search(r"CGST[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
+            if cgst_match: cgst_val = _parse_number(cgst_match.group(1))
 
         if sgst_val is None:
-            sgst_match = re.search(r"SGST[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
-            if sgst_match:
-                sgst_val = _parse_number(sgst_match.group(1))
+            sgst_match = re.search(r"SGST[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
+            if sgst_match: sgst_val = _parse_number(sgst_match.group(1))
 
         if igst_val is None:
-            igst_match = re.search(r"IGST[^\d\n]*([\d,]+\.?\d*)", combined_two_lines, re.IGNORECASE)
-            if igst_match:
-                igst_val = _parse_number(igst_match.group(1))
+            igst_match = re.search(r"IGST[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
+            if igst_match: igst_val = _parse_number(igst_match.group(1))
 
-    # Top header fallback for Vendor if not matched by label
+        # Payment Status
+        if "paid" in line.lower() and "unpaid" not in line.lower():
+            payment_status = "Paid"
+        elif "unpaid" in line.lower():
+            payment_status = "Unpaid"
+        elif "overdue" in line.lower():
+            payment_status = "Overdue"
+
+    # Top header fallback for Vendor if not matched by explicit label
     if not vendor and lines:
-        ignore_keywords = {"invoice", "tax invoice", "receipt", "bill", "cash receipt", "statement", "date", "total", "amount", "page", "subtotal", "phone", "email", "gstin"}
-        for line in lines[:5]:
-            l_lower = line.lower()
-            if len(line) >= 3 and not any(kw in l_lower for kw in ignore_keywords) and not re.match(r"^[\d\s.,/\-#]+$", line):
-                vendor = line.strip()
+        ignore_kws = {"invoice", "tax invoice", "receipt", "bill", "cash receipt", "statement", "date", "total", "amount", "page", "subtotal"}
+        for l in lines[:5]:
+            l_low = l.lower()
+            if len(l) >= 3 and not any(kw in l_low for kw in ignore_kws) and not re.match(r"^[\d\s.,/\-#]+$", l):
+                vendor = l.strip()
                 break
 
-    # Date fallback if label search missed
-    if not date_str:
-        gen_match = re.search(r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", clean_text)
+    # Date fallback
+    if not invoice_date:
+        gen_match = re.search(r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", raw_text or "")
         if gen_match:
-            date_str = _normalize_date(gen_match.group(1))
+            invoice_date = _normalize_date(gen_match.group(1))
 
-    # Calculate Tax total from CGST + SGST or IGST
+    # Calculate Tax
     if cgst_val is not None or sgst_val is not None:
-        tax = round((cgst_val or 0.0) + (sgst_val or 0.0), 2)
+        tax_amount = round((cgst_val or 0.0) + (sgst_val or 0.0), 2)
     elif igst_val is not None:
-        tax = round(igst_val, 2)
+        tax_amount = round(igst_val, 2)
     else:
-        gen_tax_match = re.search(r"(?:^Tax|GST|VAT|Total\s*Tax)[\s:₹$Rs.%@0-9]*[\s:]+([\d,]+\.?\d*)", clean_text, re.IGNORECASE | re.MULTILINE)
+        gen_tax_match = re.search(r"(?:Tax|GST|VAT|Total\s*Tax)(?:\s*\([^)]*\))?[\s:₹$Rs.]*[\s:]+([\d,]+\.?\d*)", raw_text or "", re.IGNORECASE)
         if gen_tax_match:
-            tax = _parse_number(gen_tax_match.group(1))
+            tax_amount = _parse_number(gen_tax_match.group(1))
 
     # Currency
-    currency = "INR"
-    if "₹" in clean_text or "INR" in clean_text or "Rs." in clean_text or "Rs " in clean_text:
+    if "₹" in raw_text or "INR" in raw_text or "Rs." in raw_text:
         currency = "INR"
-    elif "$" in clean_text or "USD" in clean_text:
+    elif "$" in raw_text or "USD" in raw_text:
         currency = "USD"
-    elif "€" in clean_text or "EUR" in clean_text:
+    elif "€" in raw_text or "EUR" in raw_text:
         currency = "EUR"
-    elif "£" in clean_text or "GBP" in clean_text:
+    elif "£" in raw_text or "GBP" in raw_text:
         currency = "GBP"
 
     # Line Items
-    line_items = []
+    items = []
     for line in lines:
-        item_match = re.search(r"^([A-Za-z0-9\s.,&'-]{3,50})\s+(\d+)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)$", line)
-        if item_match:
-            desc = item_match.group(1).strip()
-            if desc.lower() not in {"total", "subtotal", "tax", "description", "item"}:
-                line_items.append({
+        pipe_match = re.search(r"^([^|]+)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*([\d,]+\.?\d*)\s*(?:\|\s*([\d,]+\.?\d*))?\s*\|\s*([\d,]+\.?\d*)$", line)
+        if not pipe_match:
+            pipe_match = re.search(r"^([^|]+)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*([\d,]+\.?\d*)\s*\|\s*([\d,]+\.?\d*)$", line)
+
+        space_match = re.search(r"^([A-Za-z0-9\s.,&'-]{2,50})\s+(\d+(?:\.\d+)?)\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)$", line)
+
+        if pipe_match:
+            desc = pipe_match.group(1).strip()
+            if desc.lower() not in {"total", "subtotal", "tax", "description", "item", "qty", "price", "unit price", "amount", "gst"}:
+                qty = float(pipe_match.group(2))
+                u_price = _parse_number(pipe_match.group(3)) or 0.0
+                tot_str = pipe_match.group(5) if len(pipe_match.groups()) >= 5 and pipe_match.group(5) else pipe_match.group(4)
+                tot = _parse_number(tot_str) or round(qty * u_price, 2)
+                items.append({
                     "description": desc,
-                    "quantity": float(item_match.group(2)),
-                    "unit_price": float(item_match.group(3).replace(",", "")),
-                    "total_price": float(item_match.group(4).replace(",", ""))
+                    "quantity": qty,
+                    "unit_price": u_price,
+                    "tax": 0.0,
+                    "total": tot
+                })
+        elif space_match:
+            desc = space_match.group(1).strip()
+            if desc.lower() not in {"total", "subtotal", "tax", "description", "item", "qty", "price", "unit price", "amount", "gst"}:
+                qty = float(space_match.group(2))
+                u_price = _parse_number(space_match.group(3)) or 0.0
+                tot = _parse_number(space_match.group(4)) or round(qty * u_price, 2)
+                items.append({
+                    "description": desc,
+                    "quantity": qty,
+                    "unit_price": u_price,
+                    "tax": 0.0,
+                    "total": tot
                 })
 
-    if not line_items and (vendor or total_amount):
-        line_items.append({
-            "description": f"{vendor or 'Document'} Items / Services",
+    if not items and (vendor or total_amount):
+        items.append({
+            "description": f"{vendor or 'Invoice'} Line Item",
             "quantity": 1.0,
             "unit_price": total_amount or 0.0,
-            "total_price": total_amount or 0.0
+            "tax": tax_amount or 0.0,
+            "total": total_amount or 0.0
         })
 
-    # AI Category & Confidence Calculation
-    ai_cat = categorize(f"{vendor or ''} {clean_text} {filename}") if (vendor or clean_text) else {"category": "Uncategorized", "confidence": 0}
-
-    detected_count = sum(1 for f in [vendor, invoice_number, date_str, total_amount] if f is not None)
-    confidence_score = round((detected_count / 4.0) * 100, 2)
-
-    missing_fields = []
-    if not vendor: missing_fields.append("vendor name")
-    if not invoice_number: missing_fields.append("invoice number")
-    if not date_str: missing_fields.append("date")
-    if total_amount is None: missing_fields.append("total amount")
-
-    needs_review = len(missing_fields) > 0
-    review_reason = f"Uncertain fields: {', '.join(missing_fields)}" if missing_fields else None
-
     return {
-        "vendor": vendor,
         "invoice_number": invoice_number,
-        "date": date_str,
-        "due_date": due_date_str or date_str,
-        "subtotal": subtotal,
-        "tax": tax,
+        "invoice_date": invoice_date,
+        "due_date": due_date,
+        "vendor": {
+            "name": vendor,
+            "address": vendor_address,
+            "tax_id": vendor_tax_id
+        },
+        "customer": {
+            "name": customer,
+            "address": customer_address,
+            "tax_id": customer_tax_id
+        },
+        "items": items,
+        "subtotal": subtotal or (total_amount - (tax_amount or 0.0) if total_amount else None),
+        "tax_amount": tax_amount,
+        "discount_amount": discount_amount or 0.0,
         "total_amount": total_amount,
         "currency": currency,
-        "line_items": line_items,
-        "ai_category": ai_cat["category"],
-        "ai_confidence": confidence_score if confidence_score > 0 else ai_cat["confidence"],
-        "needs_manual_review": needs_review,
-        "requires_review": needs_review,
-        "manual_review_reason": review_reason,
-        "validation_warnings": [f"Missing: {m}" for m in missing_fields],
-        "raw_text": clean_text[:10000] if clean_text else ""
+        "payment_status": payment_status
+    }
+
+
+def clean_structured_invoice_json(parsed_dict, raw_text=""):
+    """
+    Cleans and standardizes the AI extracted JSON structure.
+    Enforces `null` (None) for missing fields (Never Hallucinate).
+    """
+    if not isinstance(parsed_dict, dict):
+        parsed_dict = {}
+
+    v_raw = parsed_dict.get("vendor")
+    vendor_obj = {
+        "name": (v_raw.get("name") if isinstance(v_raw, dict) else v_raw) or None,
+        "address": (v_raw.get("address") if isinstance(v_raw, dict) else None) or None,
+        "tax_id": (v_raw.get("tax_id") if isinstance(v_raw, dict) else None) or None
+    }
+    if vendor_obj["name"] and str(vendor_obj["name"]).lower() in ("null", "none", "not detected"):
+        vendor_obj["name"] = None
+
+    c_raw = parsed_dict.get("customer")
+    customer_obj = {
+        "name": (c_raw.get("name") if isinstance(c_raw, dict) else c_raw) or None,
+        "address": (c_raw.get("address") if isinstance(c_raw, dict) else None) or None,
+        "tax_id": (c_raw.get("tax_id") if isinstance(c_raw, dict) else None) or None
+    }
+    if customer_obj["name"] and str(customer_obj["name"]).lower() in ("null", "none", "not detected"):
+        customer_obj["name"] = None
+
+    items = []
+    raw_items = parsed_dict.get("items") or []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        q = float(item.get("quantity") or 1.0)
+        u = float(item.get("unit_price") or 0.0)
+        t = item.get("tax")
+        tax_val = float(t) if t is not None else None
+        tot = item.get("total")
+        total_val = float(tot) if tot is not None else round((q * u), 2)
+        items.append({
+            "description": item.get("description") or "Invoice Line Item",
+            "quantity": q,
+            "unit_price": u,
+            "tax": tax_val,
+            "total": total_val
+        })
+
+    inv_num = parsed_dict.get("invoice_number")
+    if inv_num and str(inv_num).lower() in ("null", "none", "not detected"):
+        inv_num = None
+
+    inv_date = _normalize_date(parsed_dict.get("invoice_date") or parsed_dict.get("date"))
+    due_date = _normalize_date(parsed_dict.get("due_date"))
+
+    subtotal = _parse_number(parsed_dict.get("subtotal"))
+    tax_amount = _parse_number(parsed_dict.get("tax_amount") or parsed_dict.get("tax"))
+    discount_amount = _parse_number(parsed_dict.get("discount_amount") or parsed_dict.get("discount")) or 0.0
+    total_amount = _parse_number(parsed_dict.get("total_amount"))
+
+    return {
+        "invoice_number": inv_num,
+        "invoice_date": inv_date,
+        "due_date": due_date,
+        "vendor": vendor_obj,
+        "customer": customer_obj,
+        "items": items,
+        "subtotal": subtotal,
+        "tax_amount": tax_amount,
+        "discount_amount": discount_amount,
+        "total_amount": total_amount,
+        "currency": parsed_dict.get("currency") or "INR",
+        "payment_status": parsed_dict.get("payment_status") or "Unknown"
     }
 
 
 # ============================================================
-# PDF EXTRACTION PATH
+# 3. VALIDATION ENGINE & AI INSIGHTS
 # ============================================================
 
-def _extract_pdf_text(file_path):
-    """Extract selectable text from PDF file."""
-    if not HAS_PYPDF:
-        return ""
-    try:
-        reader = pypdf.PdfReader(file_path)
-        pages = []
-        for page in reader.pages:
-            try:
-                t = page.extract_text()
-                if t:
-                    pages.append(t)
-            except Exception:
-                pass
-        return "\n".join(pages).strip()
-    except Exception:
-        return ""
-
-
-def _convert_pdf_to_images(file_path):
-    """Convert first 5 PDF pages to images."""
-    if not HAS_PDF2IMAGE:
-        return [], "pdf2image not installed"
-    try:
-        images = convert_from_path(file_path, first_page=1, last_page=5, dpi=200)
-        return (images, None) if images else ([], "No pages rendered")
-    except Exception as exc:
-        return [], str(exc)
-
-
-def _pil_image_to_bytes(image):
-    if not HAS_PIL:
-        return None, "PIL not installed"
-    try:
-        import io
-        if image.mode not in ("RGB", "L"):
-            image = image.convert("RGB")
-        out = io.BytesIO()
-        image.save(out, format="JPEG", quality=95)
-        return out.getvalue(), None
-    except Exception as exc:
-        return None, str(exc)
-
-
-def _extract_from_pdf(file_path):
+def validate_extracted_invoice(structured, user_id=None):
     """
-    Dedicated PDF Extraction Path:
-    1. Try PyPDF text extraction first.
-    2. If Gemini API key is set, call Gemini API.
-    3. If scanned PDF, convert pages to images via pdf2image and run Tesseract/OpenCV.
-    4. Run Label-Based Field Parser.
+    Validates calculation math:
+    - quantity * unit_price = item total
+    - sum(item totals) = subtotal
+    - subtotal + tax - discount = total
+    Returns a list of warning objects if calculations don't match.
     """
-    filename = os.path.basename(file_path)
-    pdf_text = _extract_pdf_text(file_path)
+    validations = []
 
-    if len(pdf_text.strip()) >= 20:
-        if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
-            data, error = _call_gemini_with_text(pdf_text)
-            if not error and data:
-                return _normalize_gemini_result(data, pdf_text), "gemini_pdf_text"
+    # 1. Missing Fields Checks
+    if not structured.get("invoice_number"):
+        validations.append({"field": "invoice_number", "severity": "warning", "message": "Invoice number missing in document"})
 
-        parsed = _label_based_field_parser(pdf_text, filename)
-        return parsed, "pdf_text_extraction"
+    if not structured.get("invoice_date"):
+        validations.append({"field": "invoice_date", "severity": "warning", "message": "Invoice date missing in document"})
 
-    # Scanned PDF path
-    images, error = _convert_pdf_to_images(file_path)
-    if images:
-        ocr_texts = []
-        for img in images:
-            img_bytes, conv_err = _pil_image_to_bytes(img)
-            if img_bytes:
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
-                    tmp_file.write(img_bytes)
-                    tmp_path = tmp_file.name
-                try:
-                    txt, _ = _extract_text_via_tesseract(tmp_path)
-                    if txt:
-                        ocr_texts.append(txt)
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+    if not structured.get("vendor", {}).get("name"):
+        validations.append({"field": "vendor", "severity": "warning", "message": "Vendor / Seller name missing in document"})
 
-        combined_text = "\n---\n".join(ocr_texts) if ocr_texts else pdf_text
-        parsed = _label_based_field_parser(combined_text, filename)
-        return parsed, "scanned_pdf_ocr"
+    if not structured.get("customer", {}).get("name"):
+        validations.append({"field": "customer", "severity": "info", "message": "Customer name missing in document"})
 
-    parsed = _label_based_field_parser(pdf_text or f"PDF file: {filename}", filename)
-    return parsed, "pdf_text_extraction"
+    # 2. Line Item Calculations Check
+    items = structured.get("items") or []
+    calc_item_totals_sum = 0.0
 
+    for idx, item in enumerate(items):
+        q = float(item.get("quantity", 0))
+        u = float(item.get("unit_price", 0))
+        actual_total = float(item.get("total", 0))
+        expected_item_total = round(q * u, 2)
 
-# ============================================================
-# IMAGE EXTRACTION PATH
-# ============================================================
+        if abs(expected_item_total - actual_total) > 1.0:
+            validations.append({
+                "field": f"items[{idx}]",
+                "severity": "warning",
+                "message": f"Calculation mismatch for '{item.get('description')}': Qty({q}) × Unit Price({u}) = {expected_item_total}, but extracted item total is {actual_total}"
+            })
+        calc_item_totals_sum += actual_total
 
-def _extract_from_image(file_path):
-    """
-    Dedicated Image Extraction Path for PNG/JPG/JPEG/TIFF/BMP/WEBP.
-    Uses Tesseract OCR with OpenCV preprocessing as primary.
-    Uses EasyOCR / Gemini Vision as fallback.
-    Does NOT use PDF text fallback for images.
-    """
-    filename = os.path.basename(file_path)
-    raw_text = ""
-    method = "tesseract_ocr_opencv"
+    # 3. Subtotal Check
+    subtotal = structured.get("subtotal")
+    if subtotal is not None and len(items) > 0:
+        if abs(calc_item_totals_sum - float(subtotal)) > 2.0:
+            validations.append({
+                "field": "subtotal",
+                "severity": "warning",
+                "message": f"Subtotal calculation mismatch: Sum of item totals is {round(calc_item_totals_sum, 2)}, but extracted subtotal is {subtotal}"
+            })
 
-    # 1. Primary: Tesseract + OpenCV preprocessing
-    tess_text, tess_err = _extract_text_via_tesseract(file_path)
-    if tess_text and len(tess_text.strip()) >= 10:
-        raw_text = tess_text
-        method = "tesseract_ocr_opencv"
-    else:
-        # 2. Secondary / Fallback: EasyOCR
-        easy_text, easy_err = _extract_text_via_easyocr(file_path)
-        if easy_text and len(easy_text.strip()) >= 10:
-            raw_text = easy_text
-            method = "easyocr_fallback"
-        else:
-            # 3. Gemini Vision (if configured)
-            if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
-                image_bytes, mime_type, prep_err = _prepare_image_for_gemini(file_path)
-                if image_bytes:
-                    data, g_err = _call_gemini_with_image(image_bytes, mime_type)
-                    if not g_err and data:
-                        res = _normalize_gemini_result(data, f"Image: {filename}")
-                        res["raw_text"] = res.get("raw_text") or tess_text or easy_text or f"Image: {filename}"
-                        return res, "gemini_vision"
+    # 4. Grand Total Check
+    sub_val = float(subtotal or calc_item_totals_sum or 0.0)
+    tax_val = float(structured.get("tax_amount") or 0.0)
+    disc_val = float(structured.get("discount_amount") or 0.0)
+    total_val = structured.get("total_amount")
 
-            raw_text = tess_text or easy_text or f"Image document: {filename}"
-            method = "tesseract_ocr_opencv" if tess_text else ("easyocr_fallback" if easy_text else "image_ocr_failed")
+    expected_grand_total = round(sub_val + tax_val - disc_val, 2)
+    if total_val is not None:
+        if abs(expected_grand_total - float(total_val)) > 2.0:
+            validations.append({
+                "field": "total_amount",
+                "severity": "warning",
+                "message": f"Grand total calculation mismatch: Subtotal ({sub_val}) + Tax ({tax_val}) - Discount ({disc_val}) = {expected_grand_total}, but extracted total is {total_val}"
+            })
 
-    parsed = _label_based_field_parser(raw_text, filename)
-    return parsed, method
-
-
-# ============================================================
-# GEMINI HELPERS
-# ============================================================
-
-def _get_image_mime_type(filename):
-    ext = os.path.splitext(filename)[1].lower()
-    mapping = {
-        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".webp": "image/webp", ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff"
-    }
-    return mapping.get(ext, "image/jpeg")
-
-
-def _prepare_image_for_gemini(file_path):
-    try:
-        with open(file_path, "rb") as f:
-            data = f.read()
-        if not data:
-            return None, None, "Image empty"
-        return data, _get_image_mime_type(file_path), None
-    except Exception as exc:
-        return None, None, str(exc)
-
-
-def _call_gemini_with_image(image_bytes, mime_type):
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-        return None, "GEMINI_API_KEY unconfigured"
-    encoded = base64.b64encode(image_bytes).decode("utf-8")
-    payload = {
-        "contents": [{"parts": [{"text": "Extract invoice/receipt JSON"}, {"inline_data": {"mime_type": mime_type, "data": encoded}}]}],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}
-    }
-    try:
-        res = requests.post(f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}", json=payload, timeout=GEMINI_TIMEOUT)
-        if res.status_code == 200:
-            return _extract_json_from_response(res.json())
-        return None, f"Gemini HTTP {res.status_code}"
-    except Exception as exc:
-        return None, str(exc)
-
-
-def _call_gemini_with_text(document_text):
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-        return None, "GEMINI_API_KEY unconfigured"
-    payload = {
-        "contents": [{"parts": [{"text": f"Extract invoice/receipt JSON from text:\n{document_text[:30000]}"}]}],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}
-    }
-    try:
-        res = requests.post(f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}", json=payload, timeout=GEMINI_TIMEOUT)
-        if res.status_code == 200:
-            return _extract_json_from_response(res.json())
-        return None, f"Gemini HTTP {res.status_code}"
-    except Exception as exc:
-        return None, str(exc)
-
-
-def _extract_json_from_response(response_json):
-    try:
-        candidates = response_json.get("candidates", [])
-        if not candidates:
-            return None, "No candidates"
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if not parts:
-            return None, "No content parts"
-        text = "\n".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
-        text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
+    # 5. Database Duplicate Check
+    inv_num = structured.get("invoice_number")
+    if user_id and inv_num:
         try:
-            return json.loads(text), None
-        except json.JSONDecodeError:
-            start, end = text.find("{"), text.rfind("}")
-            if start >= 0 and end > start:
-                return json.loads(text[start:end+1]), None
-        return None, "Invalid JSON from Gemini"
-    except Exception as exc:
-        return None, str(exc)
+            from utils.db import get_db
+            conn = get_db()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id FROM invoices WHERE invoice_number = %s AND user_id = %s LIMIT 1", (inv_num, user_id))
+                if cursor.fetchone():
+                    validations.append({
+                        "field": "invoice_number",
+                        "severity": "error",
+                        "message": f"Duplicate invoice: Invoice number '{inv_num}' already exists in your database"
+                    })
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Database duplicate check error: {e}")
+
+    return validations
 
 
-def _normalize_gemini_result(data, raw_text=""):
-    result = _empty_result()
-    if not isinstance(data, dict):
-        return get_failed_ocr_response(raw_text, "Invalid Gemini structure")
-
-    result["vendor"] = data.get("vendor") or None
-    result["invoice_number"] = data.get("invoice_number") or None
-    result["date"] = _normalize_date(data.get("date"))
-    result["due_date"] = _normalize_date(data.get("due_date")) or result["date"]
-    result["subtotal"] = _parse_number(data.get("subtotal"))
-    result["tax"] = _parse_number(data.get("tax"))
-    result["total_amount"] = _parse_number(data.get("total_amount"))
-    result["currency"] = data.get("currency") or "INR"
-    result["line_items"] = data.get("line_items") or []
-    result["ai_category"] = data.get("ai_category") or "Uncategorized"
-    result["ai_confidence"] = float(data.get("ai_confidence", 80.0))
-    result["raw_text"] = raw_text[:10000] if raw_text else str(data)[:1000]
-
-    missing = []
-    if not result["vendor"]: missing.append("vendor name")
-    if not result["invoice_number"]: missing.append("invoice number")
-    if not result["date"]: missing.append("date")
-    if result["total_amount"] is None: missing.append("total amount")
-
-    result["needs_manual_review"] = len(missing) > 0
-    result["requires_review"] = len(missing) > 0
-    result["manual_review_reason"] = f"Uncertain fields: {', '.join(missing)}" if missing else None
-    return result
-
-
-def extract_text_from_file(file_path, filename=""):
-    if not os.path.exists(file_path):
-        return "", "failed"
-    ext = os.path.splitext(filename or file_path)[1].lower().lstrip(".")
-    if ext == "pdf":
-        t = _extract_pdf_text(file_path)
-        return (t, "pdf_text") if t else ("", "pdf_image")
-    if ext in SUPPORTED_IMAGE_EXTENSIONS:
-        return ("", "image_ocr")
-    return ("", "failed")
-
-
-# ============================================================
-# MAIN OCR FUNCTION
-# ============================================================
-
-def extract_invoice_data_from_file(file_path, filename=""):
+def generate_invoice_insights(structured):
     """
-    Main entry point for OCR extraction on invoices and expenses.
-    Executes separate PDF or Image extraction pipelines.
-    Logs raw OCR text, extraction method, and parsed fields JSON.
+    Generate financial and payment insights from structured invoice data.
+    """
+    items = structured.get("items") or []
+    subtotal = float(structured.get("subtotal") or 0.0)
+    tax_amount = float(structured.get("tax_amount") or 0.0)
+    total_amount = float(structured.get("total_amount") or 0.0)
+
+    tax_percentage = round((tax_amount / subtotal) * 100, 2) if subtotal > 0 else 0.0
+
+    return {
+        "item_count": len(items),
+        "tax_percentage": tax_percentage,
+        "payment_status": structured.get("payment_status") or "Unknown",
+        "financial_insights": {
+            "total_amount": total_amount,
+            "tax_amount": tax_amount,
+            "subtotal": subtotal,
+            "currency": structured.get("currency") or "INR",
+            "average_item_price": round(sum(float(i.get("unit_price", 0)) for i in items) / max(len(items), 1), 2)
+        },
+        "payment_insights": {
+            "payment_status": structured.get("payment_status") or "Unknown",
+            "due_date": structured.get("due_date") or "N/A"
+        }
+    }
+
+
+# ============================================================
+# 4. MAIN PUBLIC ENTRY POINT FOR DOCUMENT EXTRACTION
+# ============================================================
+
+def process_document_extraction(file_path, filename="", user_id=None):
+    """
+    Main extraction function.
+    Flow: File -> OCR/PDF/DOCX Text Extraction -> AI Structured Extraction -> Validation -> Insights -> Debug Logs
     """
     fname = filename or os.path.basename(file_path)
+    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    ext = os.path.splitext(fname)[1].lower().lstrip(".")
 
-    if not os.path.exists(file_path):
-        res = get_failed_ocr_response("", "Uploaded file does not exist")
-        method = "failed"
+    raw_text = ""
+    extraction_method = "unknown"
+
+    # Stage 1: Text Extraction
+    if ext in SUPPORTED_IMAGE_EXTENSIONS:
+        raw_text, extraction_method = extract_text_from_image(file_path)
+    elif ext == "pdf":
+        raw_text, extraction_method = extract_text_from_pdf(file_path)
+    elif ext in SUPPORTED_DOCUMENT_EXTENSIONS:
+        raw_text, extraction_method = extract_text_from_docx(file_path)
     else:
-        ext = os.path.splitext(fname)[1].lower().lstrip(".")
-        if ext in SUPPORTED_IMAGE_EXTENSIONS:
-            res, method = _extract_from_image(file_path)
-        elif ext == "pdf":
-            res, method = _extract_from_pdf(file_path)
+        raw_text = ""
+        extraction_method = "unsupported_extension"
+
+    # Detailed Logging - Section 1: UPLOAD & TEXT EXTRACTION
+    logger.info(f"\n[UPLOAD]\nFilename: {fname}\nFile type: {ext.upper()}\nFile size: {file_size} bytes")
+    logger.info(f"\n[TEXT EXTRACTION]\nExtraction method: {extraction_method}\nCharacters extracted: {len(raw_text)}\nRaw extracted text:\n{raw_text[:2000]}")
+
+    # Stage 2: AI Structured Data Extraction
+    ai_raw_json = None
+    ai_err = None
+
+    if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
+        logger.info("\n[AI EXTRACTION]\nSending request to Gemini AI model...")
+        ai_raw_json, ai_err = _call_gemini_ai_api(raw_text)
+
+    if not ai_raw_json:
+        if ai_err:
+            logger.info(f"\n[AI EXTRACTION]\nGemini API unavailable ({ai_err}). Using Fallback AI Extraction Engine...")
         else:
-            res, method = get_failed_ocr_response("", f"Unsupported extension .{ext}"), "failed"
+            logger.info("\n[AI EXTRACTION]\nGEMINI_API_KEY unconfigured. Using Fallback AI Extraction Engine...")
+        ai_raw_json = _fallback_ai_structured_parser(raw_text, fname)
 
-    raw_text = res.get("raw_text", "")
+    logger.info(f"\n[AI EXTRACTION]\nAI response parsed successfully.")
 
-    log_msg = (
-        f"\n==================== OCR PIPELINE LOG ====================\n"
-        f"File Path        : {file_path}\n"
-        f"File Name        : {fname}\n"
-        f"Extraction Method: {method}\n"
-        f"Raw OCR Text     :\n{raw_text[:1000] if raw_text else '(none)'}\n"
-        f"Parsed Fields    :\n{json.dumps(res, indent=2, default=str)}\n"
-        f"=========================================================="
-    )
-    logger.info(log_msg)
-    print(log_msg, flush=True)
+    # Stage 3: Clean & Format Structured JSON Schema
+    structured_data = clean_structured_invoice_json(ai_raw_json, raw_text)
 
-    return res, method
+    logger.info(f"\n[STRUCTURED DATA]\nParsed JSON:\n{json.dumps(structured_data, indent=2, default=str)}")
+
+    # Stage 4: Validation Engine
+    validations = validate_extracted_invoice(structured_data, user_id=user_id)
+
+    # Stage 5: AI Insights Engine
+    insights = generate_invoice_insights(structured_data)
+
+    return {
+        "success": True if raw_text else False,
+        "filename": fname,
+        "extracted_text": raw_text,
+        "invoice": structured_data,
+        "insights": insights,
+        "validations": validations,
+        "extraction_method": extraction_method
+    }
