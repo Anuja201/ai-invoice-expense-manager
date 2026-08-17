@@ -27,6 +27,7 @@ import logging
 from datetime import datetime, date
 
 import requests
+# pyrefly: ignore [missing-import]
 from flask import Blueprint, jsonify, request
 
 logging.basicConfig(level=logging.INFO)
@@ -40,10 +41,12 @@ ocr_bp = Blueprint("ocr", __name__)
 
 # PyMuPDF (fitz)
 try:
+    # pyrefly: ignore [missing-import]
     import pymupdf as fitz
     HAS_PYMUPDF = True
 except ImportError:
     try:
+        # pyrefly: ignore [missing-import]
         import fitz
         HAS_PYMUPDF = True
     except ImportError:
@@ -51,6 +54,7 @@ except ImportError:
 
 # pdfplumber
 try:
+    # pyrefly: ignore [missing-import]
     import pdfplumber
     HAS_PDFPLUMBER = True
 except ImportError:
@@ -58,6 +62,7 @@ except ImportError:
 
 # pypdf
 try:
+    # pyrefly: ignore [missing-import]
     import pypdf
     HAS_PYPDF = True
 except ImportError:
@@ -67,6 +72,7 @@ except ImportError:
 HAS_EASYOCR = False
 EASYOCR_READER = None
 try:
+    # pyrefly: ignore [missing-import]
     import easyocr
     HAS_EASYOCR = True
 except ImportError:
@@ -74,6 +80,7 @@ except ImportError:
 
 # PyTesseract
 try:
+    # pyrefly: ignore [missing-import]
     import pytesseract
     HAS_PYTESSERACT = True
     tesseract_paths = [
@@ -90,6 +97,7 @@ except ImportError:
 
 # OpenCV & PIL
 try:
+    # pyrefly: ignore [missing-import]
     import cv2
     import numpy as np
     HAS_OPENCV = True
@@ -97,6 +105,7 @@ except ImportError:
     HAS_OPENCV = False
 
 try:
+    # pyrefly: ignore [missing-import]
     from PIL import Image
     import io
     HAS_PIL = True
@@ -105,6 +114,7 @@ except ImportError:
 
 # python-docx
 try:
+    # pyrefly: ignore [missing-import]
     import docx
     HAS_DOCX = True
 except ImportError:
@@ -557,7 +567,10 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
 
         # Invoice Number
         if not invoice_number:
-            inv_match = re.search(r"(?:Tax\s*Invoice\s*No|Invoice\s*Number|Invoice\s*No|Invoice\s*#|Inv\s*No|Inv\s*#|Bill\s*No|Receipt\s*No|Receipt\s*#|Ref\s*No)[\s:]+([A-Za-z0-9-_/#]{2,30})", line, re.IGNORECASE)
+            inv_match = re.search(
+                r"(?:Tax\s*Invoice\s*No|Invoice\s*Number|Invoice\s*No|Invoice\s*#|Inv\s*No|Inv\s*#|Bill\s*No|Receipt\s*No|Receipt\s*#|Ref\s*No)[\s:]+([A-Za-z0-9-_/#]{2,30})",
+                line, re.IGNORECASE
+            )
             if inv_match:
                 num_cand = inv_match.group(1).strip()
                 if num_cand.lower() not in {"date", "no", "number", "tax"}:

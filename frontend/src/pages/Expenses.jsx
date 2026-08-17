@@ -1,6 +1,11 @@
 /**
  * pages/Expenses.jsx
- * Expense management: list, add, edit, upload receipt/PDF with OCR & editable fields, delete
+ * Expense management: list, add, edit, upload receipt/PDF with OCR & editable fields, delete.
+ *
+ * OCR field mapping (all null-safe, no invented values):
+ *   vendor       ← vendor (null → empty string → user sees it's missing)
+ *   amount       ← total_amount (primary) → subtotal (fallback) → '' (never defaulted)
+ *   receipt_date ← date from OCR (null → '' — never defaults to today)
  */
 
 import { useState, useEffect } from 'react';
@@ -16,6 +21,41 @@ const emptyForm = {
   receipt_date: new Date().toISOString().split('T')[0],
   payment_method: 'upi'
 };
+
+/**
+ * Returns an amber input style when the field's confidence is false (uncertain).
+ */
+function uncertainStyle(confident) {
+  if (confident) return {};
+  return {
+    borderColor: '#F59E0B',
+    boxShadow: '0 0 0 2px rgba(245,158,11,0.15)',
+    background: 'rgba(245,158,11,0.04)',
+  };
+}
+
+/**
+ * Amber badge shown next to labels of uncertain OCR fields.
+ */
+function UncertainBadge() {
+  return (
+    <span style={{
+      display: 'inline-block',
+      marginLeft: 6,
+      fontSize: 10,
+      fontWeight: 700,
+      color: '#92400E',
+      background: '#FEF3C7',
+      border: '1px solid #FDE68A',
+      borderRadius: 4,
+      padding: '1px 5px',
+      verticalAlign: 'middle',
+      letterSpacing: 0.2,
+    }}>
+      ⚠ Uncertain
+    </span>
+  );
+}
 
 export default function Expenses() {
   const [expenses, setExpenses] = useState([]);
@@ -36,6 +76,8 @@ export default function Expenses() {
   const [uploadResult, setUploadResult] = useState(null);
   const [ocrError, setOcrError] = useState('');
   const [ocrForm, setOcrForm] = useState(null);
+  // Per-field confidence from backend (true = detected, false = uncertain)
+  const [fieldConf, setFieldConf] = useState({});
 
   const fetchExpenses = async () => {
     try {
@@ -141,10 +183,12 @@ export default function Expenses() {
     setOcrError('');
     setUploadResult(null);
     setOcrForm(null);
+    setFieldConf({});
 
     try {
       const res = await expenseService.upload(file);
       const data = res.data.extracted_data;
+      const conf = data?.confidence_per_field || {};
 
       setUploadResult({
         extraction_method: res.data.extraction_method || 'AI OCR',
@@ -152,22 +196,30 @@ export default function Expenses() {
         file_url: res.data.file_url,
         needs_manual_review: data?.needs_manual_review || false,
         manual_review_reason: data?.manual_review_reason || null,
+        validation_warnings: data?.validation_warnings || [],
       });
+      setFieldConf(conf);
 
+      // Field mapping: null-safe, no invented values
+      // amount       ← total_amount (primary) → subtotal (fallback) → '' (user must fill)
+      // receipt_date ← date (null → '' — never defaults to today)
       setOcrForm({
-        title: data?.title || '',
-        vendor: data?.vendor || '',
-        amount: data?.amount !== undefined && data?.amount !== null ? data.amount : '',
-        receipt_date: data?.receipt_date || new Date().toISOString().split('T')[0],
+        title:          data?.title || '',
+        vendor:         data?.vendor || '',
+        amount:         data?.total_amount != null
+                          ? data.total_amount
+                          : (data?.subtotal != null ? data.subtotal : ''),
+        receipt_date:   data?.date || '',     // null/missing → empty — user must fill
         payment_method: data?.payment_method || 'upi',
-        description: data?.description || '',
-        ai_category: data?.ai_category || 'Uncategorized',
-        ai_confidence: data?.ai_confidence || 80,
-        receipt_file: data?.file_name || ''
+        description:    data?.description || '',
+        ai_category:    data?.ai_category || 'Uncategorized',
+        ai_confidence:  data?.ai_confidence || 0,
+        receipt_file:   data?.file_name || '',
       });
     } catch (err) {
       const resp = err.response?.data;
       setOcrError(resp?.error || 'OCR extraction failed. Please try manual entry or try another file.');
+      setFieldConf({});
     } finally {
       setUploadLoading(false);
     }
@@ -179,16 +231,18 @@ export default function Expenses() {
     setOcrError('');
 
     const amountNum = parseFloat(ocrForm.amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      setOcrError('Amount must be a positive number');
+
+    // Validate required fields — block save if empty/null
+    if (!ocrForm.title.trim()) {
+      setOcrError('Title is required — please fill it in before saving.');
       return;
     }
-    if (!ocrForm.title.trim()) {
-      setOcrError('Title is required');
+    if (isNaN(amountNum) || amountNum <= 0) {
+      setOcrError('Amount must be a positive number — please fill it in before saving.');
       return;
     }
     if (!ocrForm.receipt_date) {
-      setOcrError('Receipt date is required');
+      setOcrError('Receipt date is required — OCR could not detect it, please enter it manually.');
       return;
     }
 
@@ -196,11 +250,12 @@ export default function Expenses() {
     try {
       await expenseService.create({
         ...ocrForm,
-        amount: amountNum
+        amount: amountNum,
       });
       setShowUploadModal(false);
       setUploadResult(null);
       setOcrForm(null);
+      setFieldConf({});
       await fetchExpenses();
     } catch (err) {
       setOcrError(err.response?.data?.error || 'Failed to save expense');
@@ -208,6 +263,12 @@ export default function Expenses() {
       setSubmitting(false);
     }
   };
+
+  const hasMissingRequired = ocrForm && (
+    !ocrForm.title.trim() ||
+    ocrForm.amount === '' || ocrForm.amount === null || parseFloat(ocrForm.amount) <= 0 ||
+    !ocrForm.receipt_date
+  );
 
   // Compute total
   const total = expenses.reduce((sum, e) => sum + parseFloat(e.amount), 0);
@@ -217,10 +278,10 @@ export default function Expenses() {
       <div className="page-header">
         <div className="page-header-left">
           <h1>Expenses</h1>
-          <p>Track spending with AI auto-categorization & OCR receipt upload</p>
+          <p>Track spending with AI auto-categorization &amp; OCR receipt upload</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-secondary" onClick={() => { setShowUploadModal(true); setUploadResult(null); setOcrForm(null); setOcrError(''); }}>
+          <button className="btn btn-secondary" onClick={() => { setShowUploadModal(true); setUploadResult(null); setOcrForm(null); setOcrError(''); setFieldConf({}); }}>
             📄 Upload Receipt
           </button>
           <button className="btn btn-primary" onClick={openCreate}>
@@ -403,13 +464,13 @@ export default function Expenses() {
       {/* OCR Receipt Upload Modal */}
       {showUploadModal && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowUploadModal(false)}>
-          <div className="modal">
+          <div className="modal" style={{ maxWidth: 580 }}>
             <div className="modal-header">
               <div>
                 <div className="modal-title">Upload Expense Receipt / PDF</div>
-                <div className="modal-subtitle">AI will extract details — review & edit fields before saving</div>
+                <div className="modal-subtitle">AI extracts fields — review &amp; correct highlighted fields before saving</div>
               </div>
-              <button className="modal-close" onClick={() => { setShowUploadModal(false); setUploadResult(null); setOcrForm(null); setOcrError(''); }}>✕</button>
+              <button className="modal-close" onClick={() => { setShowUploadModal(false); setUploadResult(null); setOcrForm(null); setOcrError(''); setFieldConf({}); }}>✕</button>
             </div>
 
             <div className="modal-body">
@@ -443,47 +504,127 @@ export default function Expenses() {
               {uploadLoading && (
                 <div style={{ textAlign: 'center', padding: 28 }}>
                   <div style={{ width:28, height:28, border:'3px solid var(--border)', borderTopColor:'var(--primary)', borderRadius:'50%', animation:'spin 0.7s linear infinite', margin:'0 auto 12px' }} />
-                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>AI reading receipt & extracting fields...</p>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>AI reading receipt &amp; extracting fields...</p>
                 </div>
               )}
 
               {ocrForm && !uploadLoading && (
                 <form onSubmit={handleSaveOcrExpense} className="modal-form" style={{ marginTop: 4 }}>
-                  <div style={{ background: 'var(--success-light)', border: '1px solid #A7F3D0', borderRadius: 'var(--radius-sm)', padding: 12, marginBottom: 16 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--success)', marginBottom: 2 }}>
-                      ✅ Receipt Extracted ({uploadResult?.extraction_method || 'AI OCR'})
+
+                  {/* Status banner — amber if review needed, green if all clear */}
+                  {uploadResult?.needs_manual_review ? (
+                    <div style={{
+                      background: '#FFFBEB',
+                      border: '1px solid #FDE68A',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '10px 14px',
+                      marginBottom: 16,
+                    }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#92400E', marginBottom: 4 }}>
+                        ⚠️ Manual Review Required ({uploadResult?.extraction_method || 'AI OCR'})
+                      </div>
+                      {uploadResult?.manual_review_reason && (
+                        <div style={{ fontSize: 12, color: '#78350F' }}>
+                          {uploadResult.manual_review_reason}
+                        </div>
+                      )}
+                      {uploadResult?.validation_warnings?.length > 0 && (
+                        <ul style={{ margin: '6px 0 0', padding: '0 0 0 16px', fontSize: 12, color: '#92400E' }}>
+                          {uploadResult.validation_warnings.map((w, i) => <li key={i}>{w}</li>)}
+                        </ul>
+                      )}
+                      <div style={{ fontSize: 11, color: '#B45309', marginTop: 6 }}>
+                        Fields with <strong>⚠ Uncertain</strong> badges could not be read from the receipt — please fill them in before saving.
+                      </div>
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                      Please review and edit any extracted OCR fields below before saving.
+                  ) : (
+                    <div style={{ background: 'var(--success-light)', border: '1px solid #A7F3D0', borderRadius: 'var(--radius-sm)', padding: 12, marginBottom: 16 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--success)', marginBottom: 2 }}>
+                        ✅ Receipt Extracted ({uploadResult?.extraction_method || 'AI OCR'})
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                        All critical fields detected. Please review before saving.
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">
+                        Title *
+                        {!fieldConf.vendor && <UncertainBadge />}
+                      </label>
+                      <input
+                        className="form-input"
+                        name="title"
+                        value={ocrForm.title}
+                        onChange={e => setOcrForm(f => ({ ...f, title: e.target.value }))}
+                        placeholder="Enter expense title"
+                        style={uncertainStyle(fieldConf.vendor)}
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">
+                        Amount (₹) *
+                        {!fieldConf.total_amount && <UncertainBadge />}
+                      </label>
+                      <input
+                        className="form-input"
+                        type="number"
+                        name="amount"
+                        value={ocrForm.amount}
+                        onChange={e => setOcrForm(f => ({ ...f, amount: e.target.value }))}
+                        placeholder="Enter total amount"
+                        min="0.01"
+                        step="0.01"
+                        style={uncertainStyle(fieldConf.total_amount)}
+                        required
+                      />
                     </div>
                   </div>
 
                   <div className="form-row">
                     <div className="form-group">
-                      <label className="form-label">Title *</label>
-                      <input className="form-input" name="title" value={ocrForm.title} onChange={e => setOcrForm(f => ({ ...f, title: e.target.value }))} required />
+                      <label className="form-label">
+                        Vendor
+                        {!fieldConf.vendor && <UncertainBadge />}
+                      </label>
+                      <input
+                        className="form-input"
+                        name="vendor"
+                        value={ocrForm.vendor}
+                        onChange={e => setOcrForm(f => ({ ...f, vendor: e.target.value }))}
+                        placeholder="Amazon, Swiggy, Zomato..."
+                        style={uncertainStyle(fieldConf.vendor)}
+                      />
                     </div>
                     <div className="form-group">
-                      <label className="form-label">Amount (₹) *</label>
-                      <input className="form-input" type="number" name="amount" value={ocrForm.amount} onChange={e => setOcrForm(f => ({ ...f, amount: e.target.value }))} min="0.01" step="0.01" required />
-                    </div>
-                  </div>
-
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label className="form-label">Vendor</label>
-                      <input className="form-input" name="vendor" value={ocrForm.vendor} onChange={e => setOcrForm(f => ({ ...f, vendor: e.target.value }))} placeholder="Amazon, Starbucks..." />
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">Receipt Date *</label>
-                      <input className="form-input" type="date" name="receipt_date" value={ocrForm.receipt_date} onChange={e => setOcrForm(f => ({ ...f, receipt_date: e.target.value }))} required />
+                      <label className="form-label">
+                        Receipt Date *
+                        {!fieldConf.date && <UncertainBadge />}
+                      </label>
+                      <input
+                        className="form-input"
+                        type="date"
+                        name="receipt_date"
+                        value={ocrForm.receipt_date}
+                        onChange={e => setOcrForm(f => ({ ...f, receipt_date: e.target.value }))}
+                        style={uncertainStyle(fieldConf.date)}
+                        required
+                      />
                     </div>
                   </div>
 
                   <div className="form-row">
                     <div className="form-group">
                       <label className="form-label">Payment Method</label>
-                      <select className="form-select" name="payment_method" value={ocrForm.payment_method} onChange={e => setOcrForm(f => ({ ...f, payment_method: e.target.value }))}>
+                      <select
+                        className="form-select"
+                        name="payment_method"
+                        value={ocrForm.payment_method}
+                        onChange={e => setOcrForm(f => ({ ...f, payment_method: e.target.value }))}
+                      >
                         {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m.replace('_', ' ')}</option>)}
                       </select>
                     </div>
@@ -491,7 +632,8 @@ export default function Expenses() {
                       <label className="form-label">AI Category</label>
                       <div style={{ paddingTop: 6 }}>
                         <span className="category-pill" style={{ background: '#4F46E518', color: '#4F46E5', fontSize: 13 }}>
-                          🤖 {ocrForm.ai_category} ({ocrForm.ai_confidence}% confidence)
+                          🤖 {ocrForm.ai_category}
+                          {ocrForm.ai_confidence > 0 && ` (${ocrForm.ai_confidence}% confidence)`}
                         </span>
                       </div>
                     </div>
@@ -499,16 +641,36 @@ export default function Expenses() {
 
                   <div className="form-group">
                     <label className="form-label">Description / Extracted Notes</label>
-                    <textarea className="form-textarea" name="description" value={ocrForm.description} onChange={e => setOcrForm(f => ({ ...f, description: e.target.value }))} />
+                    <textarea
+                      className="form-textarea"
+                      name="description"
+                      value={ocrForm.description}
+                      onChange={e => setOcrForm(f => ({ ...f, description: e.target.value }))}
+                    />
                   </div>
 
+                  {/* Inline save validation hint */}
+                  {hasMissingRequired && (
+                    <div style={{
+                      background: '#FFF1F2',
+                      border: '1px solid #FECDD3',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '8px 12px',
+                      fontSize: 12,
+                      color: '#BE123C',
+                      marginBottom: 12,
+                    }}>
+                      ⛔ <strong>Title</strong>, <strong>Amount</strong>, and <strong>Receipt Date</strong> are required before saving.
+                    </div>
+                  )}
+
                   <div style={{ display: 'flex', gap: 10, justifyContent: 'space-between', alignItems: 'center', marginTop: 20 }}>
-                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setOcrForm(null); setUploadResult(null); setOcrError(''); }}>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setOcrForm(null); setUploadResult(null); setOcrError(''); setFieldConf({}); }}>
                       🔄 Re-scan / Select File
                     </button>
                     <div style={{ display: 'flex', gap: 10 }}>
                       <button type="button" className="btn btn-secondary" onClick={() => setShowUploadModal(false)}>Cancel</button>
-                      <button type="submit" className="btn btn-primary" disabled={submitting}>
+                      <button type="submit" className="btn btn-primary" disabled={submitting || hasMissingRequired}>
                         {submitting ? <span className="spinner" /> : '💾 Save Expense'}
                       </button>
                     </div>
