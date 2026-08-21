@@ -237,8 +237,8 @@ export default function Settings() {
           {activeTab === 'appearance' && (
             <div className="settings-card">
               <div className="settings-card-header">
-                <h3 className="settings-card-title">🎨 Appearance &amp; Theme</h3>
-                <p className="settings-card-subtitle">Customise how InvoiceAI looks on your screen</p>
+                <h2 className="settings-card-title">Appearance</h2>
+                <p className="settings-card-subtitle">Customise how Expenza looks on your screen</p>
               </div>
               <form onSubmit={handleAppearanceSave} className="settings-form">
                 <div className="settings-group">

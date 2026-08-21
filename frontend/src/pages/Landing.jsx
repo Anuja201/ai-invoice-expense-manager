@@ -1,6 +1,6 @@
 /**
  * pages/Landing.jsx
- * Marketing landing page for InvoiceAI - animated, professional
+ * Marketing landing page for Expenza - animated, professional
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -151,7 +151,7 @@ export default function Landing() {
       <nav className="lp-nav">
         <div className="lp-nav-brand">
           <div className="lp-nav-logo">IM</div>
-          <span className="lp-nav-name">InvoiceAI</span>
+          <span className="lp-nav-name">Expenza</span>
         </div>
         <div className="lp-nav-links">
           <a href="#features">Features</a>
@@ -188,7 +188,7 @@ export default function Landing() {
             <span className="lp-dot red" />
             <span className="lp-dot yellow" />
             <span className="lp-dot green" />
-            <span className="lp-preview-label">InvoiceAI Dashboard</span>
+            <span className="lp-preview-label">Expenza Dashboard</span>
           </div>
           <div className="lp-preview-content">
             <div className="lp-preview-cards">
@@ -285,9 +285,9 @@ export default function Landing() {
       <footer className="lp-footer">
         <div className="lp-nav-brand">
           <div className="lp-nav-logo">IM</div>
-          <span className="lp-nav-name">InvoiceAI</span>
+          <span className="lp-nav-name">Expenza</span>
         </div>
-        <p className="lp-footer-copy">© 2025 InvoiceAI. Built with Flask + React + AI.</p>
+        <p className="lp-footer-copy">© 2026 Expenza. Built with Flask + React + AI.</p>
       </footer>
     </div>
   );

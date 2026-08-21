@@ -62,10 +62,9 @@ export default function Login() {
 
         <div className="login-form-container">
 
-          {/* Logo */}
           <div className="login-logo">
             <h1>Expenza</h1>
-            <p>AI Invoice & Expense Manager for Businesses</p>
+            <p>AI-Powered Finance Manager for Modern Teams</p>
           </div>
 
           {/* Error */}

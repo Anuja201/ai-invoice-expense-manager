@@ -33,9 +33,9 @@ export default function Sidebar({ isOpen, onClose }) {
         {/* Logo */}
         <div className="sidebar-logo">
           <div className="logo-mark">
-            <div className="logo-icon">IM</div>
+            <div className="logo-icon">EX</div>
             <div className="logo-text">
-              <span className="logo-name">InvoiceAI</span>
+              <span className="logo-name">Expenza</span>
               <span className="logo-sub">Finance Manager</span>
             </div>
           </div>

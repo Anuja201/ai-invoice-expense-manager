@@ -62,15 +62,9 @@ export default function Register() {
 
         <div className="login-form-container">
 
-          {/* Logo */}
           <div className="login-logo">
-
             <h1>Expenza</h1>
-
-            <p>
-              AI Invoice & Expense Manager for Businesses
-            </p>
-
+            <p>AI-Powered Finance Manager for Modern Teams</p>
           </div>
 
 
@@ -205,107 +199,34 @@ export default function Register() {
           ===================================================== */}
 
       <div className="login-right">
-
-        {/* Background decorations */}
         <div className="login-decoration decoration-one"></div>
-
         <div className="login-decoration decoration-two"></div>
-
-
+        
         <div className="login-promo">
-
-          <h2>
-            Start managing your finances smarter
-          </h2>
-
-          <p>
-            Join Expenza and simplify invoice management,
-            expense tracking, and financial insights with AI.
-          </p>
-
-
-          {/* Benefits */}
-          <div className="register-benefits">
-
-            <div className="register-benefit">
-
-              <div className="benefit-icon">
-                ✓
+          <h2>Start managing your finances smarter</h2>
+          <p>Join Expenza and simplify invoice management, expense tracking, and financial insights with AI.</p>
+          
+          <div className="dashboard-preview">
+            <div className="preview-cards">
+              <div className="preview-card">
+                <span>Monthly Expenses</span>
+                <strong>₹42,850</strong>
               </div>
-
-              <div>
-                <h3>Free to get started</h3>
-
-                <p>
-                  No credit card required.
-                </p>
+              <div className="preview-card">
+                <span>Budget Used</span>
+                <strong>68%</strong>
               </div>
-
             </div>
-
-
-            <div className="register-benefit">
-
-              <div className="benefit-icon">
-                ⚡
-              </div>
-
-              <div>
-                <h3>Set up in minutes</h3>
-
-                <p>
-                  Start managing your finances quickly.
-                </p>
-              </div>
-
+            
+            <div className="preview-chart">
+              <div className="chart-bar chart-bar-1"></div>
+              <div className="chart-bar chart-bar-2"></div>
+              <div className="chart-bar chart-bar-3"></div>
+              <div className="chart-bar chart-bar-4"></div>
+              <div className="chart-bar chart-bar-5"></div>
             </div>
-
-
-            <div className="register-benefit">
-
-              <div className="benefit-icon">
-                🤖
-              </div>
-
-              <div>
-                <h3>AI-powered automation</h3>
-
-                <p>
-                  Automatically categorize invoices and expenses.
-                </p>
-              </div>
-
-            </div>
-
           </div>
-
-
-          {/* Small Preview */}
-          <div className="register-preview">
-
-            <div className="register-preview-header">
-              <span>Monthly Expenses</span>
-              <strong>₹42,850</strong>
-            </div>
-
-            <div className="register-progress">
-
-              <div className="progress-fill"></div>
-
-            </div>
-
-            <div className="register-preview-footer">
-
-              <span>Budget Used</span>
-
-              <strong>68%</strong>
-
-            </div>
-
-          </div>
-
         </div>
-
       </div>
 
     </div>
