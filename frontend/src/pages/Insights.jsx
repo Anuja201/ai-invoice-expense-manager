@@ -6,10 +6,8 @@
 import { useState, useEffect } from 'react';
 import { dashboardService } from '../services/api';
 import api from '../services/api';
+import { fmt } from '../utils/format';
 import '../styles/Insights.css';
-
-const fmt = (n) =>
-  new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n);
 
 function HealthGauge({ score, grade, label }) {
   const angle = (score / 100) * 180;

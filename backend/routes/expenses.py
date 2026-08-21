@@ -349,17 +349,16 @@ def upload_expense():
     from werkzeug.utils import secure_filename
 
     filename = secure_filename(file.filename)
-    unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{filename}"
-    permanent_path = os.path.join(UPLOAD_FOLDER, unique_filename)
-
+    
+    from utils.storage import temp_file, store_file
+    
     try:
-        file.save(permanent_path)
-    except Exception as e:
-        return jsonify({"error": "Could not save uploaded file", "details": str(e)}), 500
-
-    try:
-        user_id = get_jwt_identity()
-        res = process_document_extraction(permanent_path, filename, user_id=user_id)
+        with temp_file(file.stream, filename) as tmp_path:
+            user_id = get_jwt_identity()
+            res = process_document_extraction(tmp_path, filename, user_id=user_id)
+            
+            file.stream.seek(0)
+            storage_result = store_file(tmp_path, filename, subfolder="receipts")
 
         raw_ocr_text = res.get("extracted_text", "")
         invoice_data = res.get("invoice", {})
@@ -400,17 +399,21 @@ def upload_expense():
         extracted_expense = {
             "title": title,
             "vendor": vendor,
-            "amount": float(amount) if amount is not None else 0.0,
-            "receipt_date": receipt_date,
+            "total_amount": float(amount) if amount is not None else 0.0,
+            "subtotal": invoice_data.get("subtotal"),
+            "date": receipt_date,
             "payment_method": "upi",
             "description": description,
             "raw_text": raw_ocr_text,
-            "ai_category": ai_result["category"],
-            "ai_confidence": ai_result["confidence"],
-            "file_name": unique_filename,
-            "file_url": f"/api/uploads/receipts/{unique_filename}",
+            "ai_category": ai_result.get("category", "Uncategorized"),
+            "ai_confidence": ai_result.get("confidence", 0),
+            "file_name": storage_result.storage_key,
+            "file_url": storage_result.file_url,
             "insights": res.get("insights", []),
-            "validations": res.get("validations", [])
+            "validations": res.get("validations", []),
+            "needs_manual_review": False, # Basic default, or pull from validations if needed
+            "manual_review_reason": None,
+            "validation_warnings": [v.get("message") for v in res.get("validations", []) if v.get("status") in ("error", "warning") and v.get("message")]
         }
 
         print(f"\n[EXPENSE UPLOAD LOG] File: {filename} | Method: {extraction_method}", flush=True)
@@ -421,17 +424,12 @@ def upload_expense():
             "message": "Receipt uploaded and extracted successfully",
             "extracted_data": extracted_expense,
             "extraction_method": extraction_method,
-            "file_name": unique_filename,
-            "file_url": f"/api/uploads/receipts/{unique_filename}"
+            "file_name": storage_result.storage_key,
+            "file_url": storage_result.file_url
         }), 200
 
     except Exception as e:
         logger.error(f"Error extracting expense receipt: {e}", exc_info=True)
-        if os.path.exists(permanent_path):
-            try:
-                os.remove(permanent_path)
-            except Exception:
-                pass
         return jsonify({"error": "Receipt extraction failed", "details": str(e)}), 500
 
 

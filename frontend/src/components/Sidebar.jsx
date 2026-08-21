@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { to: '/invoices', icon: '🧾', label: 'Invoices' },
   { to: '/expenses', icon: '💳', label: 'Expenses' },
   { to: '/insights', icon: '🤖', label: 'AI Insights' },
+  { to: '/settings', icon: '⚙️', label: 'Settings' },
 ];
 
 export default function Sidebar({ isOpen, onClose }) {

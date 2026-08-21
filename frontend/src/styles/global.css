@@ -45,6 +45,32 @@
   --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+body.dark-theme {
+  --bg: #0F172A;
+  --bg-card: #1E293B;
+  --border: #334155;
+  --border-light: #1E293B;
+  --text-primary: #F8FAFC;
+  --text-secondary: #E2E8F0;
+  --text-muted: #94A3B8;
+}
+
+body.compact-mode {
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+body.compact-mode .settings-card,
+body.compact-mode .table-card {
+  padding: 16px !important;
+}
+
+body.compact-mode .data-table th,
+body.compact-mode .data-table td {
+  padding: 8px 12px !important;
+}
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html { font-size: 16px; -webkit-font-smoothing: antialiased; }

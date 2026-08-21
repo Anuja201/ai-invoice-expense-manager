@@ -53,17 +53,25 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-  try {
-    await authService.logout();
-  } catch (_) {}
-  localStorage.removeItem('token');
-  localStorage.removeItem('user');
-  setUser(null);
-  window.location.href = '/';
-};
+    try {
+      await authService.logout();
+    } catch (_) {}
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setUser(null);
+    window.location.href = '/';
+  };
+
+  const updateUser = (newData) => {
+    setUser(prev => {
+      const updated = { ...prev, ...newData };
+      localStorage.setItem('user', JSON.stringify(updated));
+      return updated;
+    });
+  };
 
   return (
-    <AuthContext.Provider value={{ user, login, register, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, register, logout, updateUser, loading }}>
       {children}
     </AuthContext.Provider>
   );

@@ -43,12 +43,16 @@ export const authService = {
 };
 
 
-// Dashboard
+// Existing dashboard service...
 export const dashboardService = {
   getSummary: () => api.get('/dashboard/summary'),
   getMonthlyChart: () => api.get('/dashboard/chart/monthly'),
   getCategoryChart: () => api.get('/dashboard/chart/categories'),
-  getRecentTransactions: () => api.get('/dashboard/recent'),
+};
+
+// Add the missing transactionService export
+export const transactionService = {
+  getRecent: () => api.get('/dashboard/recent'),
 };
 
 // Invoices
@@ -88,17 +92,6 @@ export const categoryService = {
   list: () => api.get('/categories/'),
 };
 
-// OCR
-export const ocrService = {
-  extract: (file) => {
-    const form = new FormData();
-    form.append('file', file);
-    return api.post('/ocr/extract', form, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    });
-  },
-  test: () => api.get('/ocr/test'),
-};
 
 // Predictions
 export const predictionsService = {

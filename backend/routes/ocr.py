@@ -1,24 +1,3 @@
-"""
-routes/ocr.py
-
-Robust, Production-Grade Document Extraction Pipeline for Invoices.
-Supports Images (PNG, JPG, WEBP), PDFs (Digital & Scanned), and Word Docs (DOC, DOCX).
-
-Pipeline Stages:
-1. File Handling & Format Identification
-2. Text Extraction:
-   - Images: Preprocessing -> EasyOCR / Tesseract
-   - PDFs: Digital Text Extraction -> Scanned PDF Page Rendering -> Image OCR
-   - DOCX: Paragraphs & Table Extraction
-3. AI Structured Data Extraction:
-   - Gemini API Integration (if API key available)
-   - High-Accuracy Deterministic AI Extraction Engine (No Hallucination)
-4. Robust JSON Parsing & Markdown Stripping
-5. Math & Business Logic Validation Engine
-6. Financial & Payment Insights Generator
-7. Detailed Backend Logging
-"""
-
 import os
 import re
 import json
@@ -33,7 +12,6 @@ from flask import Blueprint, jsonify, request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ocr_pipeline")
 
-ocr_bp = Blueprint("ocr", __name__)
 
 # ============================================================
 # DEPENDENCY IMPORTS & INITIALIZATION
@@ -83,19 +61,30 @@ try:
     # pyrefly: ignore [missing-import]
     import pytesseract
     HAS_PYTESSERACT = True
-    tesseract_paths = [
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
-    ]
-    for path in tesseract_paths:
-        if os.path.exists(path):
-            pytesseract.pytesseract.tesseract_cmd = path
-            break
 except ImportError:
     HAS_PYTESSERACT = False
 
-# OpenCV & PIL
+if HAS_PYTESSERACT:
+    import sys as _sys
+    _tess_cmd = os.getenv("TESSERACT_CMD", "").strip()
+    if not _tess_cmd:
+        # Auto-detect common Windows install locations when env var is not set
+        if _sys.platform == "win32":
+            _win_paths = [
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
+            ]
+            for _p in _win_paths:
+                if os.path.isfile(_p):
+                    _tess_cmd = _p
+                    break
+    # Fallback: bare name — assumes tesseract is in PATH (Linux / Mac / Docker)
+    if not _tess_cmd:
+        _tess_cmd = "tesseract"
+    pytesseract.pytesseract.tesseract_cmd = _tess_cmd
+    logger.info(f"Tesseract cmd configured: {_tess_cmd}")
+
 try:
     # pyrefly: ignore [missing-import]
     import cv2
@@ -152,10 +141,6 @@ def get_easyocr_reader():
     return EASYOCR_READER
 
 
-# ============================================================
-# 1. TEXT EXTRACTION PIPELINE
-# ============================================================
-
 def extract_text_from_image(file_path):
     """
     Extract raw text from an image file using EasyOCR or Tesseract.
@@ -163,14 +148,12 @@ def extract_text_from_image(file_path):
     raw_text = ""
     method = "image_ocr"
 
-    # Try PyTesseract first if available and executable exists
+    # Try PyTesseract first if available
     if HAS_PYTESSERACT:
         try:
-            t_cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
-            if os.path.exists(t_cmd):
-                txt = pytesseract.image_to_string(file_path, lang="eng")
-                if txt and len(txt.strip()) >= 5:
-                    return txt.strip(), "tesseract_ocr"
+            txt = pytesseract.image_to_string(file_path, lang="eng")
+            if txt and len(txt.strip()) >= 5:
+                return txt.strip(), "tesseract_ocr"
         except Exception as e:
             logger.warning(f"PyTesseract error: {e}")
 
@@ -187,7 +170,7 @@ def extract_text_from_image(file_path):
             logger.warning(f"EasyOCR error: {e}")
 
     # Fallback with OpenCV preprocessing + EasyOCR if available
-    if HAS_OPENCV and HAS_PIL and reader:
+    if HAS_OPENCV and reader:
         try:
             img = cv2.imread(file_path)
             if img is not None:
@@ -225,7 +208,6 @@ def extract_text_from_pdf(file_path):
         except Exception as e:
             logger.warning(f"PyMuPDF text extraction error: {e}")
 
-    # 2. Try pdfplumber if PyMuPDF extracted nothing
     if not extracted_text and HAS_PDFPLUMBER:
         try:
             with pdfplumber.open(file_path) as pdf:
@@ -253,7 +235,6 @@ def extract_text_from_pdf(file_path):
         except Exception as e:
             logger.warning(f"pypdf text extraction error: {e}")
 
-    # Check if extracted text is meaningful (contains at least 20 printable Alphanumeric characters)
     alpha_count = sum(1 for c in extracted_text if c.isalnum())
     if alpha_count >= 20:
         return extracted_text, "pdf_digital_text"
@@ -272,7 +253,6 @@ def extract_text_from_pdf(file_path):
 
                 if HAS_PIL and reader:
                     img = Image.open(io.BytesIO(img_bytes))
-                    # Save to temporary buffer or numpy array for EasyOCR
                     if HAS_OPENCV:
                         open_cv_image = np.array(img.convert("RGB"))
                         open_cv_image = open_cv_image[:, :, ::-1].copy()
@@ -320,10 +300,6 @@ def extract_text_from_docx(file_path):
         logger.error(f"DOCX extraction error: {e}")
         return "", f"docx_error: {e}"
 
-
-# ============================================================
-# 2. AI STRUCTURED EXTRACTION ENGINE
-# ============================================================
 
 def _normalize_date(date_str):
     if not date_str or str(date_str).lower() in ("null", "none", "not detected", ""):
@@ -389,7 +365,6 @@ def _parse_number(val):
 def _safe_parse_ai_json(json_raw_str):
     """
     Safely extract and parse JSON from AI response text.
-    Handles Markdown code fences ```json ... ```, extra explanatory text, invalid formatting.
     """
     if not json_raw_str or not isinstance(json_raw_str, str):
         return None, "Empty raw response string"
@@ -538,8 +513,6 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
     for idx, line in enumerate(lines):
         next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
         two_lines = f"{line} {next_line}"
-
-        # Vendor
         if not vendor:
             v_match = re.search(r"^(?:Vendor|Supplier|Merchant|Billed By|Company|Seller|Payee|Issued By)[\s:]+([A-Za-z0-9\s.,&'-]{2,50})$", line, re.IGNORECASE)
             if v_match:
@@ -552,7 +525,6 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
             if g_match:
                 vendor_tax_id = g_match.group(1).strip()
 
-        # Customer
         if not customer:
             c_match = re.search(r"^(?:Billed To|Customer|Client|Ship To|Buyer|Recipient|Invoice To)[\s:]+([A-Za-z0-9\s.,&'-]{2,50})$", line, re.IGNORECASE)
             if c_match:
@@ -578,7 +550,6 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
             elif re.search(r"\b(INV-[A-Za-z0-9-_]{3,20})\b", line, re.IGNORECASE):
                 invoice_number = re.search(r"\b(INV-[A-Za-z0-9-_]{3,20})\b", line, re.IGNORECASE).group(1).strip()
 
-        # Dates
         if not invoice_date:
             d_match = re.search(r"(?:Invoice\s*Date|Receipt\s*Date|Bill\s*Date|Date\s*of\s*Issue|Txn\s*Date|^Date)[\s:]+([A-Za-z0-9,\s/-]{6,25})", line, re.IGNORECASE)
             if d_match:
@@ -589,7 +560,6 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
             if due_match:
                 due_date = _normalize_date(due_match.group(1).strip())
 
-        # Financial Totals
         if total_amount is None:
             tot_match = re.search(r"(?:Grand\s*Total|Total\s*Amount|Total\s*Payable|Net\s*Amount|Total\s*Due|Amount\s*Paid|^Total)[^\d\n]*([\d,]+\.?\d*)", two_lines, re.IGNORECASE)
             if tot_match:
@@ -640,13 +610,11 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
                 vendor = l.strip()
                 break
 
-    # Date fallback
     if not invoice_date:
         gen_match = re.search(r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", raw_text or "")
         if gen_match:
             invoice_date = _normalize_date(gen_match.group(1))
 
-    # Calculate Tax
     if cgst_val is not None or sgst_val is not None:
         tax_amount = round((cgst_val or 0.0) + (sgst_val or 0.0), 2)
     elif igst_val is not None:
@@ -656,7 +624,6 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
         if gen_tax_match:
             tax_amount = _parse_number(gen_tax_match.group(1))
 
-    # Currency
     if "₹" in raw_text or "INR" in raw_text or "Rs." in raw_text:
         currency = "INR"
     elif "$" in raw_text or "USD" in raw_text:
@@ -666,7 +633,6 @@ def _fallback_ai_structured_parser(raw_text, filename=""):
     elif "£" in raw_text or "GBP" in raw_text:
         currency = "GBP"
 
-    # Line Items
     items = []
     for line in lines:
         pipe_match = re.search(r"^([^|]+)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*([\d,]+\.?\d*)\s*(?:\|\s*([\d,]+\.?\d*))?\s*\|\s*([\d,]+\.?\d*)$", line)
@@ -809,10 +775,6 @@ def clean_structured_invoice_json(parsed_dict, raw_text=""):
     }
 
 
-# ============================================================
-# 3. VALIDATION ENGINE & AI INSIGHTS
-# ============================================================
-
 def validate_extracted_invoice(structured, user_id=None):
     """
     Validates calculation math:
@@ -822,8 +784,6 @@ def validate_extracted_invoice(structured, user_id=None):
     Returns a list of warning objects if calculations don't match.
     """
     validations = []
-
-    # 1. Missing Fields Checks
     if not structured.get("invoice_number"):
         validations.append({"field": "invoice_number", "severity": "warning", "message": "Invoice number missing in document"})
 
@@ -836,16 +796,13 @@ def validate_extracted_invoice(structured, user_id=None):
     if not structured.get("customer", {}).get("name"):
         validations.append({"field": "customer", "severity": "info", "message": "Customer name missing in document"})
 
-    # 2. Line Item Calculations Check
     items = structured.get("items") or []
     calc_item_totals_sum = 0.0
-
     for idx, item in enumerate(items):
         q = float(item.get("quantity", 0))
         u = float(item.get("unit_price", 0))
         actual_total = float(item.get("total", 0))
         expected_item_total = round(q * u, 2)
-
         if abs(expected_item_total - actual_total) > 1.0:
             validations.append({
                 "field": f"items[{idx}]",
@@ -854,7 +811,6 @@ def validate_extracted_invoice(structured, user_id=None):
             })
         calc_item_totals_sum += actual_total
 
-    # 3. Subtotal Check
     subtotal = structured.get("subtotal")
     if subtotal is not None and len(items) > 0:
         if abs(calc_item_totals_sum - float(subtotal)) > 2.0:
@@ -864,12 +820,11 @@ def validate_extracted_invoice(structured, user_id=None):
                 "message": f"Subtotal calculation mismatch: Sum of item totals is {round(calc_item_totals_sum, 2)}, but extracted subtotal is {subtotal}"
             })
 
-    # 4. Grand Total Check
+    # Grand Total Check
     sub_val = float(subtotal or calc_item_totals_sum or 0.0)
     tax_val = float(structured.get("tax_amount") or 0.0)
     disc_val = float(structured.get("discount_amount") or 0.0)
     total_val = structured.get("total_amount")
-
     expected_grand_total = round(sub_val + tax_val - disc_val, 2)
     if total_val is not None:
         if abs(expected_grand_total - float(total_val)) > 2.0:
@@ -879,7 +834,6 @@ def validate_extracted_invoice(structured, user_id=None):
                 "message": f"Grand total calculation mismatch: Subtotal ({sub_val}) + Tax ({tax_val}) - Discount ({disc_val}) = {expected_grand_total}, but extracted total is {total_val}"
             })
 
-    # 5. Database Duplicate Check
     inv_num = structured.get("invoice_number")
     if user_id and inv_num:
         try:

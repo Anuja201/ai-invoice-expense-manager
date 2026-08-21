@@ -409,25 +409,21 @@ def upload_invoice():
         }), 400
 
     filename = secure_filename(file.filename)
-    ext = filename.rsplit(".", 1)[1].lower()
-
-    # Create unique permanent filename
-    unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{filename}"
-    permanent_path = os.path.join(UPLOAD_FOLDER, unique_filename)
-
+    
+    from utils.storage import temp_file, store_file
+    
     try:
-        file.save(permanent_path)
-    except Exception as e:
-        return jsonify({"error": "Could not save uploaded document file", "details": str(e)}), 500
+        with temp_file(file.stream, filename) as tmp_path:
+            from routes.ocr import process_document_extraction
 
-    try:
-        from routes.ocr import process_document_extraction
-
-        result = process_document_extraction(
-            permanent_path,
-            filename,
-            user_id=user_id
-        )
+            result = process_document_extraction(
+                tmp_path,
+                filename,
+                user_id=user_id
+            )
+            
+            file.stream.seek(0)
+            storage_result = store_file(tmp_path, filename, subfolder="invoices")
 
         extracted_text = result.get("extracted_text", "")
         invoice_obj = result.get("invoice", {})
@@ -468,19 +464,14 @@ def upload_invoice():
             "invoice": invoice_obj,
             "insights": insights_obj,
             "validations": validations_list,
-            "file_name": unique_filename,
-            "file_url": f"/api/uploads/{unique_filename}",
+            "file_name": storage_result.storage_key,
+            "file_url": storage_result.file_url,
             "extraction_method": method,
             "extracted_data": extracted_data_compat,
             "structured_data": invoice_obj
         }), 200
 
     except Exception as e:
-        if os.path.exists(permanent_path):
-            try:
-                os.remove(permanent_path)
-            except Exception:
-                pass
         logger.error(f"Invoice processing error: {e}", exc_info=True)
         return jsonify({
             "success": False,

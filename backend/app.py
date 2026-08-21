@@ -15,7 +15,6 @@ from routes.invoices import invoices_bp
 from routes.expenses import expenses_bp
 from routes.dashboard import dashboard_bp
 from routes.categories import categories_bp
-from routes.ocr import ocr_bp
 from routes.predictions import predictions_bp
 from routes.insights import insights_bp
 
@@ -85,12 +84,6 @@ def create_app():
         url_prefix="/api/categories"
     )
 
-    # OCR routes
-    app.register_blueprint(
-        ocr_bp,
-        url_prefix="/api/ocr"
-    )
-
     app.register_blueprint(
         predictions_bp,
         url_prefix="/api/predictions"
@@ -110,6 +103,11 @@ def create_app():
             "version": "2.0.0"
         }), 200
         
+    @app.route("/api/files/<path:storage_key>")
+    def serve_file(storage_key):
+        from utils.storage import get_local_serve_path
+        return send_from_directory(get_local_serve_path(), storage_key)
+
     @app.route("/uploads/<path:filename>")
     @app.route("/api/uploads/<path:filename>")
     def uploaded_file(filename):
@@ -117,11 +115,7 @@ def create_app():
             os.path.dirname(os.path.abspath(__file__)),
             Config.UPLOAD_FOLDER
         )
-
-        return send_from_directory(
-            upload_folder,
-            filename
-        )
+        return send_from_directory(upload_folder, filename)
 
     @app.errorhandler(404)
     def not_found(e):

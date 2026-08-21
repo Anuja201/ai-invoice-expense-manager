@@ -6,11 +6,8 @@ Loads environment variables and sets Flask/JWT/DB config
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
-import pytesseract
 
 load_dotenv()
-
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 class Config:
@@ -48,6 +45,13 @@ class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "60"))
+
+    # Tesseract: configurable for cross-platform deployment.
+    # Set TESSERACT_CMD in .env on Windows; leave empty on Linux (uses PATH).
+    TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
+
+    # Storage backend: local | s3 | gcs
+    STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").strip()
 
     # File upload
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "uploads")
