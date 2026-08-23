@@ -1,6 +1,6 @@
 /* styles/global.css - Design system tokens and reset */
 
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=DM+Mono:wght@400;500&display=swap');
 
 :root {
   /* Colors */
@@ -207,3 +207,106 @@ ul { list-style: none; }
 }
 
 .slide-in-right { animation: slideInRight 0.3s ease forwards; }
+
+/* ── New helpers used by the UI overhaul ────────────────────── */
+
+/* Staggered card entrance */
+@keyframes slideInCard {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.slide-in-card { animation: slideInCard 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Skeleton shimmer for loading states */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--border-light) 25%, var(--border) 50%, var(--border-light) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: var(--radius-sm);
+}
+
+/* SVG icon helpers */
+.icon-svg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Status dot */
+.status-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.green  { background: var(--success); }
+.status-dot.amber  { background: var(--warning); }
+.status-dot.red    { background: var(--danger); }
+.status-dot.blue   { background: var(--primary); }
+.status-dot.gray   { background: var(--text-muted); }
+
+/* Gradient text utility */
+.gradient-text {
+  background: linear-gradient(135deg, var(--primary), var(--purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* category pill used across pages */
+.category-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  transition: var(--transition);
+}
+.category-pill:hover { filter: brightness(0.93); }
+
+/* Empty state shared */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 64px 24px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.empty-state h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.empty-state p {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0;
+  max-width: 300px;
+  line-height: 1.6;
+}
+
+/* Error / info banners */
+.error-message {
+  background: var(--danger-light);
+  border: 1px solid #FECACA;
+  color: var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+/* Green legend dot used in dashboard */
+.legend-dot.green { background: #10B981; }
