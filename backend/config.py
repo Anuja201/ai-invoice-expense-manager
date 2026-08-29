@@ -11,18 +11,18 @@ load_dotenv()
 
 
 class Config:
-    # Flask
-    SECRET_KEY = os.getenv(
-        "SECRET_KEY",
-        "your-super-secret-key-change-in-production"
-    )
-    DEBUG = os.getenv("DEBUG", "True") == "True"
+    # Flask Environment & Debug
+    FLASK_ENV = os.getenv("FLASK_ENV", "development")
+    DEBUG = os.getenv("DEBUG", "False" if FLASK_ENV == "production" else "True") == "True"
 
-    # JWT
-    JWT_SECRET_KEY = os.getenv(
-        "JWT_SECRET_KEY",
-        "jwt-secret-key-change-in-production"
-    )
+    # Enforce strict secrets in production
+    if FLASK_ENV == "production":
+        SECRET_KEY = os.environ["SECRET_KEY"]
+        JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
+    else:
+        SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production")
+        JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "jwt-secret-key-change-in-production")
+
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
 
     # MySQL Database

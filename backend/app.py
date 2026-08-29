@@ -17,6 +17,7 @@ from routes.dashboard import dashboard_bp
 from routes.categories import categories_bp
 from routes.predictions import predictions_bp
 from routes.insights import insights_bp
+from routes.reports import reports_bp
 
 
 def create_app():
@@ -92,6 +93,11 @@ def create_app():
     app.register_blueprint(
         insights_bp,
         url_prefix="/api/insights"
+    )
+
+    app.register_blueprint(
+        reports_bp,
+        url_prefix="/api/reports"
     )
 
 

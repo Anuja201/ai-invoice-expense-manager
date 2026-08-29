@@ -19,4 +19,6 @@ pdf2image==1.16.3
 # easyocr==1.7.1
 
 # Production extras
-# gunicorn==21.2.0
+gunicorn==21.2.0
+boto3==1.34.0
+google-cloud-storage==2.14.0

@@ -13,6 +13,7 @@ import Dashboard from './pages/Dashboard';
 import Invoices from './pages/Invoices';
 import Expenses from './pages/Expenses';
 import Insights from './pages/Insights';
+import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 
 export const applyAppearance = (appearance) => {
@@ -111,6 +112,17 @@ export default function App() {
               <ProtectedRoute>
                 <Layout>
                   <Insights />
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/reports"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <Reports />
                 </Layout>
               </ProtectedRoute>
             }
