@@ -2,8 +2,8 @@
 -- Creates database, tables, and sample data
 
 -- Create database if not exists
-CREATE DATABASE IF NOT EXISTS invoice_manager;
-USE invoice_manager;
+CREATE DATABASE IF NOT EXISTS railway;
+USE railway;
 
 -- Users table
 CREATE TABLE IF NOT EXISTS users (

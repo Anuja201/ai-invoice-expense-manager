@@ -81,9 +81,16 @@ if HAS_PYTESSERACT:
                     break
     # Fallback: bare name — assumes tesseract is in PATH (Linux / Mac / Docker)
     if not _tess_cmd:
-        _tess_cmd = "tesseract"
-    pytesseract.pytesseract.tesseract_cmd = _tess_cmd
-    logger.info(f"Tesseract cmd configured: {_tess_cmd}")
+        import shutil as _shutil
+        if _shutil.which("tesseract"):
+            _tess_cmd = "tesseract"
+        else:
+            HAS_PYTESSERACT = False
+            logger.info("Tesseract executable not found in PATH, disabling PyTesseract.")
+
+    if HAS_PYTESSERACT:
+        pytesseract.pytesseract.tesseract_cmd = _tess_cmd
+        logger.info(f"Tesseract cmd configured: {_tess_cmd}")
 
 try:
     # pyrefly: ignore [missing-import]
@@ -113,7 +120,7 @@ from config import Config
 
 # Gemini Config
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
 try:
     GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "60"))
 except (TypeError, ValueError):
@@ -399,56 +406,186 @@ def _safe_parse_ai_json(json_raw_str):
     return None, "Failed to extract valid JSON dictionary"
 
 
+# MIME type mapping for Gemini Vision API
+_IMAGE_MIME_TYPES = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "tiff": "image/tiff",
+    "bmp": "image/bmp",
+}
+
+INVOICE_JSON_SCHEMA_PROMPT = """
+You are an expert financial OCR AI assistant. Extract structured JSON from the document.
+
+CRITICAL INSTRUCTIONS:
+1. Return ONLY valid JSON matching the exact schema below.
+2. NEVER HALLUCINATE OR INVENT VALUES. If a field is not explicitly present in the document, set its value to null.
+3. Keep exact dates, item names, prices, tax amounts, vendor, and customer details.
+
+EXPECTED JSON SCHEMA:
+{
+  "invoice_number": "string or null",
+  "invoice_date": "YYYY-MM-DD or null",
+  "due_date": "YYYY-MM-DD or null",
+  "vendor": {
+    "name": "string or null",
+    "address": "string or null",
+    "tax_id": "string or null"
+  },
+  "customer": {
+    "name": "string or null",
+    "address": "string or null",
+    "tax_id": "string or null"
+  },
+  "items": [
+    {
+      "description": "string",
+      "quantity": 1.0,
+      "unit_price": 0.0,
+      "tax": null,
+      "total": 0.0
+    }
+  ],
+  "subtotal": null,
+  "tax_amount": null,
+  "discount_amount": null,
+  "total_amount": null,
+  "currency": "INR",
+  "payment_status": "Paid or Unpaid or Overdue or Unknown"
+}
+"""
+
+
+def _image_to_base64(image_path):
+    """
+    Read an image file from disk and return (base64_string, mime_type).
+    Normalises TIFF/BMP images to PNG via PIL so Gemini always receives
+    a widely-supported format when the source type is exotic.
+    """
+    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
+    mime_type = _IMAGE_MIME_TYPES.get(ext, "image/jpeg")
+
+    # For formats that Gemini may not support well, convert to PNG via PIL
+    if ext in ("tiff", "bmp") and HAS_PIL:
+        try:
+            from PIL import Image as _PILImage
+            import io as _io
+            with _PILImage.open(image_path) as img:
+                buf = _io.BytesIO()
+                img.convert("RGB").save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                return b64, "image/png"
+        except Exception as e:
+            logger.warning(f"PIL TIFF/BMP conversion failed, using raw bytes: {e}")
+
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return b64, mime_type
+
+
+def _call_gemini_vision_api(image_path):
+    """
+    Send an image directly to Gemini Vision API (inline base64) and extract
+    structured invoice JSON in a single round-trip.
+    This is the PRIMARY path for PNG/JPG/image uploads — no local OCR required.
+    Returns (parsed_dict_or_None, error_string_or_None, ocr_text_or_empty).
+    """
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
+        return None, "GEMINI_API_KEY not configured", ""
+
+    try:
+        b64_data, mime_type = _image_to_base64(image_path)
+    except Exception as e:
+        return None, f"Failed to read image file: {e}", ""
+
+    # Two-part prompt: ask Gemini to first describe the text it reads (for raw_text)
+    # then return the structured JSON
+    vision_prompt = (
+        INVOICE_JSON_SCHEMA_PROMPT
+        + "\n\nAnalyse the attached image. It is a financial document (invoice, receipt, or bill). "
+        + "Extract ALL text you can read from the image, then return structured JSON."
+    )
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": vision_prompt},
+                {"inline_data": {"mime_type": mime_type, "data": b64_data}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "responseMimeType": "application/json"
+        }
+    }
+
+    try:
+        url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
+        resp = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT)
+
+        if resp.status_code == 200:
+            res_data = resp.json()
+            candidates = res_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    ai_text = parts[0].get("text", "")
+                    parsed_json, err = _safe_parse_ai_json(ai_text)
+                    if parsed_json:
+                        # Reconstruct a best-effort raw_text from the structured data
+                        # so the rest of the pipeline (fallback parser, logs) work normally
+                        ocr_text = _reconstruct_text_from_vision_json(parsed_json)
+                        return parsed_json, None, ocr_text
+                    return None, f"Vision JSON parse error: {err}", ""
+            return None, "Gemini Vision returned empty candidate contents", ""
+        else:
+            return None, f"Gemini Vision HTTP {resp.status_code}: {resp.text[:300]}", ""
+    except Exception as e:
+        return None, f"Gemini Vision API request failed: {e}", ""
+
+
+def _reconstruct_text_from_vision_json(parsed):
+    """
+    Build a human-readable text summary from a vision-extracted JSON dict.
+    Used so downstream logging and fallback logic receive non-empty raw_text.
+    """
+    if not isinstance(parsed, dict):
+        return ""
+    parts = []
+    vendor = parsed.get("vendor") or {}
+    if isinstance(vendor, dict) and vendor.get("name"):
+        parts.append(f"Vendor: {vendor['name']}")
+    customer = parsed.get("customer") or {}
+    if isinstance(customer, dict) and customer.get("name"):
+        parts.append(f"Customer: {customer['name']}")
+    if parsed.get("invoice_number"):
+        parts.append(f"Invoice No: {parsed['invoice_number']}")
+    if parsed.get("invoice_date"):
+        parts.append(f"Date: {parsed['invoice_date']}")
+    if parsed.get("total_amount") is not None:
+        parts.append(f"Total: {parsed['total_amount']}")
+    if parsed.get("tax_amount") is not None:
+        parts.append(f"Tax: {parsed['tax_amount']}")
+    for item in (parsed.get("items") or []):
+        if isinstance(item, dict) and item.get("description"):
+            parts.append(f"Item: {item['description']} x{item.get('quantity',1)} = {item.get('total',0)}")
+    return "\n".join(parts)
+
+
 def _call_gemini_ai_api(raw_text):
     """
     Calls Gemini API to extract structured JSON from raw document text.
+    Used for PDFs and DOCX files where text has already been extracted locally.
     """
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
         return None, "GEMINI_API_KEY not configured"
 
-    prompt = f"""
-You are an expert financial OCR AI assistant. Extract structured JSON from the following invoice raw text.
-
-CRITICAL INSTRUCTIONS:
-1. Return ONLY valid JSON matching the exact schema below.
-2. NEVER HALLUCINATE OR INVENT VALUES. If a field is not explicitly present in the raw text, set its value to null.
-3. Keep exact dates, item names, prices, tax amounts, vendor, and customer details.
-
-EXPECTED JSON SCHEMA:
-{{
-  "invoice_number": "string or null",
-  "invoice_date": "YYYY-MM-DD or null",
-  "due_date": "YYYY-MM-DD or null",
-  "vendor": {{
-    "name": "string or null",
-    "address": "string or null",
-    "tax_id": "string or null"
-  }},
-  "customer": {{
-    "name": "string or null",
-    "address": "string or null",
-    "tax_id": "string or null"
-  }},
-  "items": [
-    {{
-      "description": "string",
-      "quantity": float,
-      "unit_price": float,
-      "tax": float or null,
-      "total": float
-    }}
-  ],
-  "subtotal": float or null,
-  "tax_amount": float or null,
-  "discount_amount": float or null,
-  "total_amount": float or null,
-  "currency": "INR",
-  "payment_status": "Paid" | "Unpaid" | "Overdue" | "Unknown"
-}}
-
-RAW DOCUMENT TEXT:
-{raw_text[:25000]}
-"""
+    prompt = (
+        INVOICE_JSON_SCHEMA_PROMPT
+        + f"\n\nRAW DOCUMENT TEXT:\n{raw_text[:25000]}"
+    )
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -890,7 +1027,17 @@ def generate_invoice_insights(structured):
 def process_document_extraction(file_path, filename="", user_id=None):
     """
     Main extraction function.
-    Flow: File -> OCR/PDF/DOCX Text Extraction -> AI Structured Extraction -> Validation -> Insights -> Debug Logs
+
+    Image files (PNG/JPG/etc.):
+      PRIMARY  → Gemini Vision API  (inline base64, single round-trip, no local OCR needed)
+      FALLBACK → Local OCR (pytesseract / easyocr) → Gemini text API → deterministic parser
+
+    PDF files:
+      PRIMARY  → PyMuPDF / pdfplumber / pypdf digital text extraction
+      FALLBACK → Render pages to images → EasyOCR → Gemini text API
+
+    DOCX/DOC files:
+      PRIMARY  → python-docx paragraph & table extraction
     """
     fname = filename or os.path.basename(file_path)
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
@@ -898,10 +1045,32 @@ def process_document_extraction(file_path, filename="", user_id=None):
 
     raw_text = ""
     extraction_method = "unknown"
+    ai_raw_json = None
+    ai_err = None
+    vision_used = False
 
-    # Stage 1: Text Extraction
+    logger.info(f"\n[UPLOAD]\nFilename: {fname}\nFile type: {ext.upper()}\nFile size: {file_size} bytes")
+
+    # ── Stage 1: Text / Image Extraction ──────────────────────────────────────
     if ext in SUPPORTED_IMAGE_EXTENSIONS:
-        raw_text, extraction_method = extract_text_from_image(file_path)
+        # PRIMARY for images: Gemini Vision API (OCR + extraction in one call)
+        if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
+            logger.info("\n[IMAGE OCR]\nUsing Gemini Vision API for image extraction...")
+            vision_json, vision_err, vision_text = _call_gemini_vision_api(file_path)
+            if vision_json:
+                ai_raw_json = vision_json
+                raw_text = vision_text or _reconstruct_text_from_vision_json(vision_json)
+                extraction_method = "gemini_vision_ocr"
+                vision_used = True
+                logger.info(f"[IMAGE OCR] Gemini Vision succeeded. Chars reconstructed: {len(raw_text)}")
+            else:
+                logger.warning(f"[IMAGE OCR] Gemini Vision failed ({vision_err}). Falling back to local OCR...")
+
+        # FALLBACK for images: local OCR (tesseract / easyocr)
+        if not vision_used:
+            raw_text, extraction_method = extract_text_from_image(file_path)
+            logger.info(f"[IMAGE OCR] Local OCR result — method: {extraction_method}, chars: {len(raw_text)}")
+
     elif ext == "pdf":
         raw_text, extraction_method = extract_text_from_pdf(file_path)
     elif ext in SUPPORTED_DOCUMENT_EXTENSIONS:
@@ -910,40 +1079,49 @@ def process_document_extraction(file_path, filename="", user_id=None):
         raw_text = ""
         extraction_method = "unsupported_extension"
 
-    # Detailed Logging - Section 1: UPLOAD & TEXT EXTRACTION
-    logger.info(f"\n[UPLOAD]\nFilename: {fname}\nFile type: {ext.upper()}\nFile size: {file_size} bytes")
     logger.info(f"\n[TEXT EXTRACTION]\nExtraction method: {extraction_method}\nCharacters extracted: {len(raw_text)}\nRaw extracted text:\n{raw_text[:2000]}")
 
-    # Stage 2: AI Structured Data Extraction
-    ai_raw_json = None
-    ai_err = None
+    # ── Stage 2: AI Structured Data Extraction ────────────────────────────────
+    # Skip if Gemini Vision already returned a parsed JSON (vision_used=True)
+    if not vision_used:
+        if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
+            logger.info("\n[AI EXTRACTION]\nSending request to Gemini AI model...")
+            ai_raw_json, ai_err = _call_gemini_ai_api(raw_text)
 
-    if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
-        logger.info("\n[AI EXTRACTION]\nSending request to Gemini AI model...")
-        ai_raw_json, ai_err = _call_gemini_ai_api(raw_text)
+        if not ai_raw_json:
+            if ai_err:
+                logger.info(f"\n[AI EXTRACTION]\nGemini API unavailable ({ai_err}). Using Fallback AI Extraction Engine...")
+            else:
+                logger.info("\n[AI EXTRACTION]\nGEMINI_API_KEY unconfigured. Using Fallback AI Extraction Engine...")
+            ai_raw_json = _fallback_ai_structured_parser(raw_text, fname)
 
+    # Final safety net: if still no JSON, run deterministic parser on whatever text we have
     if not ai_raw_json:
-        if ai_err:
-            logger.info(f"\n[AI EXTRACTION]\nGemini API unavailable ({ai_err}). Using Fallback AI Extraction Engine...")
-        else:
-            logger.info("\n[AI EXTRACTION]\nGEMINI_API_KEY unconfigured. Using Fallback AI Extraction Engine...")
+        logger.warning("[AI EXTRACTION] All AI paths failed. Running deterministic parser as last resort.")
         ai_raw_json = _fallback_ai_structured_parser(raw_text, fname)
 
     logger.info(f"\n[AI EXTRACTION]\nAI response parsed successfully.")
 
-    # Stage 3: Clean & Format Structured JSON Schema
+    # ── Stage 3: Clean & Format Structured JSON Schema ────────────────────────
     structured_data = clean_structured_invoice_json(ai_raw_json, raw_text)
 
     logger.info(f"\n[STRUCTURED DATA]\nParsed JSON:\n{json.dumps(structured_data, indent=2, default=str)}")
 
-    # Stage 4: Validation Engine
+    # ── Stage 4: Validation Engine ────────────────────────────────────────────
     validations = validate_extracted_invoice(structured_data, user_id=user_id)
 
-    # Stage 5: AI Insights Engine
+    # ── Stage 5: AI Insights Engine ───────────────────────────────────────────
     insights = generate_invoice_insights(structured_data)
 
+    # Consider success if we have raw_text OR if Vision API produced structured data
+    has_meaningful_data = bool(raw_text) or bool(
+        structured_data.get("vendor", {}).get("name")
+        or structured_data.get("total_amount")
+        or structured_data.get("invoice_number")
+    )
+
     return {
-        "success": True if raw_text else False,
+        "success": has_meaningful_data,
         "filename": fname,
         "extracted_text": raw_text,
         "invoice": structured_data,

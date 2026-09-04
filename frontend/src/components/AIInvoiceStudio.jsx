@@ -15,8 +15,17 @@
 
 import { useState, useEffect } from 'react';
 import { invoiceService, expenseService } from '../services/api';
-import { fmtDecimal as fmt } from '../utils/format';
 import '../styles/AIInvoiceStudio.css';
+
+const fmt = (n, curr = 'INR') => {
+  const cMap = { INR: 'en-IN', USD: 'en-US', EUR: 'de-DE', GBP: 'en-GB' };
+  const locale = cMap[curr] || 'en-IN';
+  try {
+    return new Intl.NumberFormat(locale, { style: 'currency', currency: curr, maximumFractionDigits: 2 }).format(n || 0);
+  } catch (e) {
+    return `₹${(n || 0).toFixed(2)}`;
+  }
+};
 
 export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSaved, onClose }) {
   // Processing stages: 1. upload | 2. extracting | 3. review | 4. preview
@@ -659,39 +668,12 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
                         <option value="other">Other</option>
                       </select>
                     </div>
-                    <div className="form-group">
-                      <label className="form-label">
-                        AI Category
-                        {form.ai_confidence !== undefined && form.ai_confidence !== null && (
-                          <span style={{
-                            display: 'inline-block',
-                            marginLeft: 6,
-                            fontSize: 10,
-                            fontWeight: 700,
-                            color: form.ai_confidence < 70 ? '#92400E' : '#065F46',
-                            background: form.ai_confidence < 70 ? '#FEF3C7' : '#D1FAE5',
-                            border: `1px solid ${form.ai_confidence < 70 ? '#FDE68A' : '#A7F3D0'}`,
-                            borderRadius: 4,
-                            padding: '1px 5px',
-                            verticalAlign: 'middle'
-                          }}>
-                            🤖 {form.ai_confidence}% Confident
-                          </span>
-                        )}
-                      </label>
-                      <input
-                        className="form-input"
-                        value={form.ai_category || ''}
-                        onChange={e => setForm(f => ({ ...f, ai_category: e.target.value }))}
-                        placeholder="e.g. Travel, Office Supplies"
-                      />
-                    </div>
                   </div>
                   <div className="form-group" style={{ marginTop: 8 }}>
                     <label className="form-label">Description / Notes</label>
                     <textarea
                       className="form-textarea"
-                      value={form.description || ''}
+                      value={form.description}
                       onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
                     />
                   </div>
@@ -908,7 +890,7 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
                       </div>
                     </div>
                   </div>
-                 </>
+                </>
               )}
 
               {/* Action Buttons */}
@@ -932,91 +914,91 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
         </div>
       )}
 
-          {/* Stage 4: Professional Printable Invoice Generator */}
-          {stage === 4 && mode === 'invoice' && (
-            <div className="studio-body">
-              <div className="printable-actions-bar">
-                <button className="btn btn-secondary" onClick={() => setStage(3)}>
-                  ✏️ Back to Edit
-                </button>
-                <div style={{ display: 'flex', gap: 10 }}>
-                  <button className="btn btn-secondary" onClick={() => window.print()}>
-                    🖨️ Print / Download PDF
-                  </button>
-                  <button className="btn btn-primary" onClick={handleSaveRecord} disabled={submitting}>
-                    {submitting ? <span className="spinner" /> : '💾 Save & Finalize Invoice'}
-                  </button>
-                </div>
+      {/* Stage 4: Professional Printable Invoice Generator */}
+      {stage === 4 && mode === 'invoice' && (
+        <div className="studio-body">
+          <div className="printable-actions-bar">
+            <button className="btn btn-secondary" onClick={() => setStage(3)}>
+              ✏️ Back to Edit
+            </button>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button className="btn btn-secondary" onClick={() => window.print()}>
+                🖨️ Print / Download PDF
+              </button>
+              <button className="btn btn-primary" onClick={handleSaveRecord} disabled={submitting}>
+                {submitting ? <span className="spinner" /> : '💾 Save & Finalize Invoice'}
+              </button>
+            </div>
+          </div>
+
+          {/* Printable Template Paper */}
+          <div className="invoice-print-paper" id="printable-invoice">
+            {/* Header */}
+            <div className="print-header">
+              <div>
+                <h1 className="print-brand">{form.vendor_name || 'Vendor Company'}</h1>
+                <p className="print-sub">{form.vendor_address || '123 Tech Park, Suite 400'}</p>
+                {form.vendor_tax_id && <p className="print-sub">Tax ID / GSTIN: {form.vendor_tax_id}</p>}
               </div>
-
-              {/* Printable Template Paper */}
-              <div className="invoice-print-paper" id="printable-invoice">
-                {/* Header */}
-                <div className="print-header">
-                  <div>
-                    <h1 className="print-brand">{form.vendor_name || 'Vendor Company'}</h1>
-                    <p className="print-sub">{form.vendor_address || '123 Tech Park, Suite 400'}</p>
-                    {form.vendor_tax_id && <p className="print-sub">Tax ID / GSTIN: {form.vendor_tax_id}</p>}
-                  </div>
-                  <div className="print-inv-meta">
-                    <h2 className="print-inv-title">INVOICE</h2>
-                    <div className="meta-row"><strong>Invoice #:</strong> {form.invoice_number}</div>
-                    <div className="meta-row"><strong>Date:</strong> {form.invoice_date}</div>
-                    <div className="meta-row"><strong>Due Date:</strong> {form.due_date || 'On Receipt'}</div>
-                    <div className="meta-row"><strong>Status:</strong> <span style={{ textTransform: 'uppercase', color: form.payment_status === 'paid' ? 'green' : 'red' }}>{form.payment_status}</span></div>
-                  </div>
-                </div>
-
-                {/* Customer Bill To */}
-                <div className="print-bill-to">
-                  <div>
-                    <span className="bill-label">Billed To:</span>
-                    <h3 className="bill-name">{form.customer_name || 'Valued Customer'}</h3>
-                    <p className="bill-sub">{form.customer_address || 'Customer Address'}</p>
-                    {form.customer_tax_id && <p className="bill-sub">Tax ID: {form.customer_tax_id}</p>}
-                  </div>
-                </div>
-
-                {/* Line Items Table */}
-                <table className="print-table">
-                  <thead>
-                    <tr>
-                      <th>Description</th>
-                      <th>Quantity</th>
-                      <th>Unit Price</th>
-                      <th>Tax</th>
-                      <th>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {form.items.map((item, idx) => (
-                      <tr key={idx}>
-                        <td>{item.description}</td>
-                        <td>{item.quantity}</td>
-                        <td>{fmt(item.unit_price, form.currency)}</td>
-                        <td>{fmt(item.tax, form.currency)}</td>
-                        <td>{fmt(item.total, form.currency)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                {/* Breakdown */}
-                <div className="print-footer-grid">
-                  <div className="print-notes">
-                    <h4>Payment Instructions & Notes</h4>
-                    <p>Payment Method: {form.payment_method?.toUpperCase()}</p>
-                    <p>Thank you for your business! Please remit payment prior to due date.</p>
-                  </div>
-                  <div className="print-totals">
-                    <div className="p-row"><span>Subtotal:</span> <span>{fmt(form.subtotal, form.currency)}</span></div>
-                    <div className="p-row"><span>Tax Total:</span> <span>{fmt(form.tax_amount, form.currency)}</span></div>
-                    <div className="p-row p-grand"><span>Total Due:</span> <span>{fmt(form.total_amount, form.currency)}</span></div>
-                  </div>
-                </div>
+              <div className="print-inv-meta">
+                <h2 className="print-inv-title">INVOICE</h2>
+                <div className="meta-row"><strong>Invoice #:</strong> {form.invoice_number}</div>
+                <div className="meta-row"><strong>Date:</strong> {form.invoice_date}</div>
+                <div className="meta-row"><strong>Due Date:</strong> {form.due_date || 'On Receipt'}</div>
+                <div className="meta-row"><strong>Status:</strong> <span style={{ textTransform: 'uppercase', color: form.payment_status === 'paid' ? 'green' : 'red' }}>{form.payment_status}</span></div>
               </div>
             </div>
-          )}
-      </div>
+
+            {/* Customer Bill To */}
+            <div className="print-bill-to">
+              <div>
+                <span className="bill-label">Billed To:</span>
+                <h3 className="bill-name">{form.customer_name || 'Valued Customer'}</h3>
+                <p className="bill-sub">{form.customer_address || 'Customer Address'}</p>
+                {form.customer_tax_id && <p className="bill-sub">Tax ID: {form.customer_tax_id}</p>}
+              </div>
+            </div>
+
+            {/* Line Items Table */}
+            <table className="print-table">
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th>Quantity</th>
+                  <th>Unit Price</th>
+                  <th>Tax</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {form.items.map((item, idx) => (
+                  <tr key={idx}>
+                    <td>{item.description}</td>
+                    <td>{item.quantity}</td>
+                    <td>{fmt(item.unit_price, form.currency)}</td>
+                    <td>{fmt(item.tax, form.currency)}</td>
+                    <td>{fmt(item.total, form.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {/* Breakdown */}
+            <div className="print-footer-grid">
+              <div className="print-notes">
+                <h4>Payment Instructions & Notes</h4>
+                <p>Payment Method: {form.payment_method?.toUpperCase()}</p>
+                <p>Thank you for your business! Please remit payment prior to due date.</p>
+              </div>
+              <div className="print-totals">
+                <div className="p-row"><span>Subtotal:</span> <span>{fmt(form.subtotal, form.currency)}</span></div>
+                <div className="p-row"><span>Tax Total:</span> <span>{fmt(form.tax_amount, form.currency)}</span></div>
+                <div className="p-row p-grand"><span>Total Due:</span> <span>{fmt(form.total_amount, form.currency)}</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
