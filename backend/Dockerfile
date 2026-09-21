@@ -29,6 +29,7 @@ RUN mkdir -p uploads
 ENV PORT=5000
 EXPOSE 5000
 
-# Apply pending DB migrations (non-destructive), then start gunicorn.
-# Set RUN_MIGRATIONS=false to skip. Long timeout: OCR + Gemini calls can take >30s.
-CMD ["sh", "-c", "if [ \"${RUN_MIGRATIONS:-true}\" = \"true\" ]; then python init_db.py || exit 1; fi; exec gunicorn --bind 0.0.0.0:${PORT} --workers ${WEB_CONCURRENCY:-2} --threads 2 --timeout 120 --access-logfile - wsgi:app"]
+# Apply pending DB migrations (non-destructive) in the background so gunicorn binds
+# $PORT immediately (Render fails the deploy if no port opens in time).
+# Set RUN_MIGRATIONS=false to skip. Long timeout: OCR + AI calls can take >30s.
+CMD ["sh", "-c", "if [ \"${RUN_MIGRATIONS:-true}\" = \"true\" ]; then python init_db.py & fi; exec gunicorn --bind 0.0.0.0:${PORT} --workers ${WEB_CONCURRENCY:-2} --threads 2 --timeout 120 --access-logfile - wsgi:app"]

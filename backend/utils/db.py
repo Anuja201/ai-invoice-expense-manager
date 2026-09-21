@@ -21,6 +21,7 @@ def get_db():
             Config.DATABASE_URL,
             sslmode=Config.DB_SSLMODE,
             connect_timeout=10,
+            gssencmode="disable",
             cursor_factory=psycopg2.extras.RealDictCursor,
         )
     else:
@@ -32,6 +33,7 @@ def get_db():
             dbname=Config.DB_NAME,
             sslmode=Config.DB_SSLMODE,
             connect_timeout=10,
+            gssencmode="disable",
             cursor_factory=psycopg2.extras.RealDictCursor,
         )
     connection.autocommit = False
