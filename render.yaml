@@ -29,6 +29,11 @@ services:
         sync: false
       - key: CORS_ORIGIN_REGEX
         sync: false
+      # AI extraction provider: groq or gemini (set the matching API key)
+      - key: AI_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL

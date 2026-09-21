@@ -131,6 +131,24 @@ GEMINI_ENDPOINT = (
     f"{GEMINI_MODEL}:generateContent"
 )
 
+# Groq Config (OpenAI-compatible API) — alternative to Gemini
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+
+# AI_PROVIDER: gemini | groq. Defaults to whichever key is configured (Gemini first).
+AI_PROVIDER = os.getenv("AI_PROVIDER", "").strip().lower()
+if AI_PROVIDER not in ("gemini", "groq"):
+    AI_PROVIDER = "groq" if (GROQ_API_KEY and not GEMINI_API_KEY) else "gemini"
+
+
+def _ai_configured():
+    """True when the selected AI provider has an API key."""
+    if AI_PROVIDER == "groq":
+        return bool(GROQ_API_KEY)
+    return bool(GEMINI_API_KEY) and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY"
+
 SUPPORTED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}
 SUPPORTED_DOCUMENT_EXTENSIONS = {"doc", "docx"}
 SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | {"pdf"} | SUPPORTED_DOCUMENT_EXTENSIONS
@@ -492,6 +510,8 @@ def _call_gemini_vision_api(image_path):
     This is the PRIMARY path for PNG/JPG/image uploads — no local OCR required.
     Returns (parsed_dict_or_None, error_string_or_None, ocr_text_or_empty).
     """
+    if AI_PROVIDER == "groq":
+        return _call_groq_vision_api(image_path)
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
         return None, "GEMINI_API_KEY not configured", ""
 
@@ -579,6 +599,8 @@ def _call_gemini_ai_api(raw_text):
     Calls Gemini API to extract structured JSON from raw document text.
     Used for PDFs and DOCX files where text has already been extracted locally.
     """
+    if AI_PROVIDER == "groq":
+        return _call_groq_ai_api(raw_text)
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
         return None, "GEMINI_API_KEY not configured"
 
@@ -615,6 +637,93 @@ def _call_gemini_ai_api(raw_text):
             return None, f"Gemini HTTP {resp.status_code}: {resp.text[:200]}"
     except Exception as e:
         return None, f"Gemini API request failed: {e}"
+
+
+def _groq_chat(model, messages):
+    """POST a chat completion to Groq in JSON mode. Returns (parsed_dict_or_None, error_or_None)."""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        resp = requests.post(
+            GROQ_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            timeout=GEMINI_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None, f"Groq HTTP {resp.status_code}: {resp.text[:300]}"
+        choices = resp.json().get("choices") or []
+        if not choices:
+            return None, "Groq returned no choices"
+        ai_text = (choices[0].get("message") or {}).get("content") or ""
+        parsed_json, err = _safe_parse_ai_json(ai_text)
+        if parsed_json:
+            return parsed_json, None
+        return None, f"Groq JSON parse error: {err}"
+    except Exception as e:
+        return None, f"Groq API request failed: {e}"
+
+
+def _image_to_groq_data_url(image_path, max_b64_bytes=3_500_000):
+    """
+    Return a data: URL for Groq vision (JPEG/PNG only, under Groq's 4 MB base64 limit).
+    Other formats and large images are converted/downscaled via PIL.
+    """
+    b64_data, mime_type = _image_to_base64(image_path)
+    if mime_type in ("image/png", "image/jpeg") and len(b64_data) <= max_b64_bytes:
+        return f"data:{mime_type};base64,{b64_data}"
+    if not HAS_PIL:
+        return f"data:{mime_type};base64,{b64_data}"
+    from PIL import Image as _PILImage
+    import io as _io
+    with _PILImage.open(image_path) as img:
+        img = img.convert("RGB")
+        while True:
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+            if len(b64_data) <= max_b64_bytes or min(img.size) < 400:
+                break
+            img = img.resize((int(img.width * 0.75), int(img.height * 0.75)))
+    return f"data:image/jpeg;base64,{b64_data}"
+
+
+def _call_groq_vision_api(image_path):
+    """Groq equivalent of _call_gemini_vision_api (same return shape)."""
+    if not GROQ_API_KEY:
+        return None, "GROQ_API_KEY not configured", ""
+    try:
+        data_url = _image_to_groq_data_url(image_path)
+    except Exception as e:
+        return None, f"Failed to read image file: {e}", ""
+
+    vision_prompt = (
+        INVOICE_JSON_SCHEMA_PROMPT
+        + "\n\nAnalyse the attached image. It is a financial document (invoice, receipt, or bill). "
+        + "Extract ALL text you can read from the image, then return structured JSON."
+    )
+    parsed_json, err = _groq_chat(GROQ_VISION_MODEL, [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": vision_prompt},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    }])
+    if parsed_json:
+        return parsed_json, None, _reconstruct_text_from_vision_json(parsed_json)
+    return None, err, ""
+
+
+def _call_groq_ai_api(raw_text):
+    """Groq equivalent of _call_gemini_ai_api (same return shape)."""
+    if not GROQ_API_KEY:
+        return None, "GROQ_API_KEY not configured"
+    prompt = INVOICE_JSON_SCHEMA_PROMPT + f"\n\nRAW DOCUMENT TEXT:\n{raw_text[:25000]}"
+    return _groq_chat(GROQ_MODEL, [{"role": "user", "content": prompt}])
 
 
 def _fallback_ai_structured_parser(raw_text, filename=""):
@@ -1054,13 +1163,13 @@ def process_document_extraction(file_path, filename="", user_id=None):
     # ── Stage 1: Text / Image Extraction ──────────────────────────────────────
     if ext in SUPPORTED_IMAGE_EXTENSIONS:
         # PRIMARY for images: Gemini Vision API (OCR + extraction in one call)
-        if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
-            logger.info("\n[IMAGE OCR]\nUsing Gemini Vision API for image extraction...")
+        if _ai_configured():
+            logger.info(f"\n[IMAGE OCR]\nUsing {AI_PROVIDER} vision API for image extraction...")
             vision_json, vision_err, vision_text = _call_gemini_vision_api(file_path)
             if vision_json:
                 ai_raw_json = vision_json
                 raw_text = vision_text or _reconstruct_text_from_vision_json(vision_json)
-                extraction_method = "gemini_vision_ocr"
+                extraction_method = f"{AI_PROVIDER}_vision_ocr"
                 vision_used = True
                 logger.info(f"[IMAGE OCR] Gemini Vision succeeded. Chars reconstructed: {len(raw_text)}")
             else:
@@ -1084,15 +1193,15 @@ def process_document_extraction(file_path, filename="", user_id=None):
     # ── Stage 2: AI Structured Data Extraction ────────────────────────────────
     # Skip if Gemini Vision already returned a parsed JSON (vision_used=True)
     if not vision_used:
-        if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
-            logger.info("\n[AI EXTRACTION]\nSending request to Gemini AI model...")
+        if _ai_configured():
+            logger.info(f"\n[AI EXTRACTION]\nSending request to {AI_PROVIDER} AI model...")
             ai_raw_json, ai_err = _call_gemini_ai_api(raw_text)
 
         if not ai_raw_json:
             if ai_err:
                 logger.info(f"\n[AI EXTRACTION]\nGemini API unavailable ({ai_err}). Using Fallback AI Extraction Engine...")
             else:
-                logger.info("\n[AI EXTRACTION]\nGEMINI_API_KEY unconfigured. Using Fallback AI Extraction Engine...")
+                logger.info("\n[AI EXTRACTION]\nNo AI API key configured. Using Fallback AI Extraction Engine...")
             ai_raw_json = _fallback_ai_structured_parser(raw_text, fname)
 
     # Final safety net: if still no JSON, run deterministic parser on whatever text we have
