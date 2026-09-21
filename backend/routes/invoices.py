@@ -146,7 +146,7 @@ def list_invoices():
                 params.append(sanitize_status(status_filter))
 
             if search:
-                query += " AND (i.client_name LIKE %s OR i.invoice_number LIKE %s)"
+                query += " AND (i.client_name ILIKE %s OR i.invoice_number ILIKE %s)"
                 params.extend([f"%{search}%", f"%{search}%"])
 
             query += " ORDER BY i.created_at DESC"
@@ -216,6 +216,7 @@ def create_invoice():
                 (user_id, invoice_number, client_name, client_email, amount, tax, total_amount,
                 status, category_id, description, due_date, file_name, ai_category, ai_confidence)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (
                 user_id, invoice_number, client_name,
                 data.get("client_email", ""),
@@ -223,7 +224,7 @@ def create_invoice():
                 status, category_id, description, due_date,
                 file_name, ai_cat_name, ai_conf
             ))
-            new_id = cursor.lastrowid
+            new_id = cursor.fetchone()["id"]
 
             # Insert line items if present
             for item in items:

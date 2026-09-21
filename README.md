@@ -1,6 +1,6 @@
 # 🧾 InvoiceAI - Full-Stack AI Invoice & Expense Manager
 
-A production-grade fintech SaaS application with AI-powered invoice categorization, built with React + Flask + MySQL.
+A production-grade fintech SaaS application with AI-powered invoice categorization, built with React + Flask + PostgreSQL.
 
 ---
 
@@ -58,22 +58,21 @@ invoice-app/
 ### Prerequisites
 - Node.js 18+
 - Python 3.10+
-- MySQL 8.0+
+- PostgreSQL 14+
 
 ---
 
 ### 1. Database Setup
 
+Create an empty PostgreSQL database, set `DATABASE_URL` in `backend/.env`, then:
+
 ```bash
-# Login to MySQL
-mysql -u root -p
-
-# Run schema
-source /path/to/invoice-app/database/schema.sql;
-
-# Or:
-mysql -u root -p < database/schema.sql
+cd backend
+python init_db.py              # creates tables + default categories (non-destructive)
+python init_db.py --seed-demo  # optional demo login: test@example.com / test123
 ```
+
+(`database/setup_expenses.sql` is the legacy MySQL schema, kept for reference.)
 
 ---
 
@@ -91,7 +90,7 @@ pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your MySQL credentials
+# Edit .env with your PostgreSQL DATABASE_URL
 
 # Run Flask
 python app.py
@@ -272,9 +271,14 @@ The `ai_categorizer.py` module simulates ML categorization using keyword matchin
 
 ## 🚀 Production Deployment
 
-1. Set `DEBUG=False` in `.env`
-2. Use strong `SECRET_KEY` and `JWT_SECRET_KEY`
-3. Replace in-memory token blocklist with Redis
-4. Run Flask behind **gunicorn**: `gunicorn -w 4 app:create_app()`
-5. Build frontend: `npm run build` → serve `/dist` via nginx
-6. Enable HTTPS
+GitHub → **Vercel** (frontend) + **Render** (backend, Docker) → **Railway PostgreSQL**.
+
+| | Setting |
+|---|---|
+| Vercel root directory | `frontend` (build `npm run build`, output `dist`, config in `frontend/vercel.json`) |
+| Vercel env | `VITE_API_URL=https://<your-backend>.onrender.com` |
+| Render | Blueprint `render.yaml` (Docker, root `backend`, health check `/api/health`) |
+| Render env | `DATABASE_URL` (Railway `DATABASE_PUBLIC_URL`), `DB_SSLMODE=require`, `FRONTEND_URL`, `SECRET_KEY`, `JWT_SECRET_KEY`, `GEMINI_API_KEY` |
+| Migrations | Run automatically on container start (`python init_db.py`, non-destructive) |
+
+See `backend/.env.example` and `frontend/.env.example` for all variables.

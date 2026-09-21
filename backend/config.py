@@ -25,18 +25,33 @@ class Config:
 
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
 
-    # MySQL Database
+    # PostgreSQL Database
+    # Production (Railway): set DATABASE_URL. Local dev: DATABASE_URL or DB_* vars.
+    DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or "").strip()
     DB_HOST = os.getenv("DB_HOST", "localhost")
-    DB_PORT = int(os.getenv("DB_PORT", 3306))
-    DB_USER = os.getenv("DB_USER", "root")
+    DB_PORT = int(os.getenv("DB_PORT", 5432))
+    DB_USER = os.getenv("DB_USER", "postgres")
     DB_PASSWORD = os.getenv("DB_PASSWORD", "")
     DB_NAME = os.getenv("DB_NAME", "invoice_manager")
+    # disable | prefer | require — use "require" for Railway's public URL
+    DB_SSLMODE = os.getenv("DB_SSLMODE", "prefer").strip()
 
-    # CORS
-    CORS_ORIGINS = os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:5173"
-    ).split(",")
+    # Server port (Render injects PORT)
+    PORT = int(os.getenv("PORT", 5000))
+
+    # CORS: FRONTEND_URL is the deployed Vercel URL; CORS_ORIGINS adds extra
+    # comma-separated origins. Localhost dev origins are allowed outside production.
+    _origins = [
+        o.strip().rstrip("/")
+        for o in (os.getenv("FRONTEND_URL", "") + "," + os.getenv("CORS_ORIGINS", "")).split(",")
+        if o.strip()
+    ]
+    if FLASK_ENV != "production":
+        _origins += ["http://localhost:5173", "http://127.0.0.1:5173"]
+    CORS_ORIGINS = list(dict.fromkeys(_origins))
+    # Optional regex, e.g. for Vercel preview deployments:
+    # ^https://your-project-[a-z0-9-]+\.vercel\.app$
+    CORS_ORIGIN_REGEX = os.getenv("CORS_ORIGIN_REGEX", "").strip()
 
     # Google OAuth
     GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")

@@ -49,10 +49,10 @@ def _invoice_conditions(user_id, start_date, end_date, category_id):
     conds = ["i.user_id = %s"]
     params = [user_id]
     if start_date:
-        conds.append("DATE(i.created_at) >= %s")
+        conds.append("CAST(i.created_at AS DATE) >= %s")
         params.append(start_date)
     if end_date:
-        conds.append("DATE(i.created_at) <= %s")
+        conds.append("CAST(i.created_at AS DATE) <= %s")
         params.append(end_date)
     if category_id:
         conds.append("i.category_id = %s")
@@ -133,7 +133,7 @@ def get_report_data():
                 cursor.execute(f"""
                     SELECT
                         i.id,
-                        DATE(i.created_at)  AS date,
+                        CAST(i.created_at AS DATE) AS date,
                         i.client_name       AS vendor,
                         COALESCE(c.name, i.ai_category, 'Uncategorized') AS category,
                         c.color             AS category_color,

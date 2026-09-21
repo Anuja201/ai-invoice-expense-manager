@@ -50,9 +50,9 @@ def get_insights():
 
             # 2. Month-over-month expense change
             cursor.execute("""
-                SELECT DATE_FORMAT(receipt_date, '%%Y-%%m') as month, SUM(amount) as total
+                SELECT TO_CHAR(receipt_date, 'YYYY-MM') as month, SUM(amount) as total
                 FROM expenses
-                WHERE user_id = %s AND receipt_date >= DATE_SUB(CURDATE(), INTERVAL 2 MONTH)
+                WHERE user_id = %s AND receipt_date >= CURRENT_DATE - INTERVAL '2 months'
                 GROUP BY month
                 ORDER BY month DESC LIMIT 2
             """, (user_id,))
@@ -87,7 +87,7 @@ def get_insights():
                 SELECT c.name as category, SUM(e.amount) as total
                 FROM expenses e
                 LEFT JOIN categories c ON e.category_id = c.id
-                WHERE e.user_id = %s AND e.receipt_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH)
+                WHERE e.user_id = %s AND e.receipt_date >= CURRENT_DATE - INTERVAL '1 month'
                 GROUP BY e.category_id, c.name
                 ORDER BY total DESC LIMIT 1
             """, (user_id,))
@@ -141,7 +141,7 @@ def get_insights():
                 SELECT COALESCE(SUM(total_amount), 0) as income
                 FROM invoices
                 WHERE user_id = %s AND status = 'paid'
-                  AND created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                  AND created_at >= CURRENT_DATE - INTERVAL '30 days'
             """, (user_id,))
             income_row = cursor.fetchone()
             
@@ -149,7 +149,7 @@ def get_insights():
                 SELECT COALESCE(SUM(amount), 0) as expenses
                 FROM expenses
                 WHERE user_id = %s
-                  AND receipt_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                  AND receipt_date >= CURRENT_DATE - INTERVAL '30 days'
             """, (user_id,))
             expense_row = cursor.fetchone()
             
@@ -183,7 +183,7 @@ def get_insights():
                 SELECT COUNT(*) as count
                 FROM invoices
                 WHERE user_id = %s AND status = 'draft'
-                  AND created_at < DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                  AND created_at < CURRENT_DATE - INTERVAL '7 days'
             """, (user_id,))
             old_drafts = cursor.fetchone()
             if old_drafts and old_drafts["count"] > 0:

@@ -1,0 +1,39 @@
+# Render Blueprint for the backend API (Flask + gunicorn, Docker runtime).
+# Frontend is deployed on Vercel; database is Railway PostgreSQL.
+services:
+  - type: web
+    name: ai-invoice-expense-manager-api
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: DEBUG
+        value: "False"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      # Railway PostgreSQL public connection URL (DATABASE_PUBLIC_URL in Railway)
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_SSLMODE
+        value: require
+      # Vercel production URL, e.g. https://your-project.vercel.app (no trailing slash)
+      - key: FRONTEND_URL
+        sync: false
+      - key: CORS_ORIGIN_REGEX
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: STORAGE_BACKEND
+        value: local
+      - key: RUN_MIGRATIONS
+        value: "true"

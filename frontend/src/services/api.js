@@ -5,8 +5,16 @@
 
 import axios from 'axios';
 
+// VITE_API_URL = Render backend URL in production (with or without /api).
+// Empty in local dev: '/api' is proxied to Flask by vite.config.js.
+const apiBaseUrl = (() => {
+  const url = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
+  if (!url) return '/api';
+  return url.endsWith('/api') ? url : `${url}/api`;
+})();
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',
+  baseURL: apiBaseUrl,
   headers: { 'Content-Type': 'application/json' },
 });
 

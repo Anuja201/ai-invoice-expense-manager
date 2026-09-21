@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+uploads/
+test_files/
+test_*.py
+check_expenses_schema.py
+Dockerfile
+.dockerignore

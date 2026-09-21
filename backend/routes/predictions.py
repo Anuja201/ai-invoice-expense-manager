@@ -18,12 +18,12 @@ predictions_bp = Blueprint("predictions", __name__)
 def get_monthly_expenses(cursor, user_id, months=6):
     """Fetch last N months of expense totals."""
     cursor.execute("""
-        SELECT DATE_FORMAT(receipt_date, '%%Y-%%m') as month,
+        SELECT TO_CHAR(receipt_date, 'YYYY-MM') as month,
                SUM(amount) as total,
                COUNT(*) as count
         FROM expenses
         WHERE user_id = %s
-          AND receipt_date >= DATE_SUB(CURDATE(), INTERVAL %s MONTH)
+          AND receipt_date >= CURRENT_DATE - (%s * INTERVAL '1 month')
         GROUP BY month
         ORDER BY month ASC
     """, (user_id, months))
@@ -284,11 +284,11 @@ def budget_recommendation():
                        COUNT(*) as months_active
                 FROM (
                     SELECT e.category_id,
-                           DATE_FORMAT(e.receipt_date, '%%Y-%%m') as month,
+                           TO_CHAR(e.receipt_date, 'YYYY-MM') as month,
                            SUM(e.amount) as monthly_spend
                     FROM expenses e
                     WHERE e.user_id = %s
-                      AND e.receipt_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+                      AND e.receipt_date >= CURRENT_DATE - INTERVAL '6 months'
                     GROUP BY e.category_id, month
                 ) as monthly
                 LEFT JOIN categories c ON monthly.category_id = c.id

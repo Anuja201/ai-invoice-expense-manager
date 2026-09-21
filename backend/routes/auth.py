@@ -49,7 +49,7 @@ def register():
 
     # Insert user
     user_id = execute_query(
-        "INSERT INTO users (name, email, password_hash, company, avatar_initials) VALUES (%s, %s, %s, %s, %s)",
+        "INSERT INTO users (name, email, password_hash, company, avatar_initials) VALUES (%s, %s, %s, %s, %s) RETURNING id",
         (name, email, password_hash, company, initials),
         commit=True
     )
@@ -185,7 +185,7 @@ def google_oauth():
         parts = name.split()
         initials = "".join(p[0].upper() for p in parts[:2])
         user_id = execute_query(
-            "INSERT INTO users (name, email, google_id, avatar_initials) VALUES (%s, %s, %s, %s)",
+            "INSERT INTO users (name, email, google_id, avatar_initials) VALUES (%s, %s, %s, %s) RETURNING id",
             (name, email, google_id, initials),
             commit=True
         )

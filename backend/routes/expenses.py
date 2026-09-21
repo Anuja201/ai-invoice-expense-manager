@@ -108,7 +108,7 @@ def list_expenses():
                 query += " AND e.receipt_date <= %s"
                 params.append(end_date)
             if search:
-                query += " AND (e.title LIKE %s OR e.vendor LIKE %s)"
+                query += " AND (e.title ILIKE %s OR e.vendor ILIKE %s)"
                 params.extend([f"%{search}%", f"%{search}%"])
 
             query += " ORDER BY e.receipt_date DESC, e.created_at DESC"
@@ -165,13 +165,14 @@ def create_expense():
                 (user_id, title, amount, category_id, ai_category, ai_confidence,
                  description, vendor, receipt_date, payment_method, receipt_file)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (
                 user_id, title, amount, category_id,
                 ai_cat_name, ai_conf,
                 description, vendor, receipt_date, payment_method, receipt_file
             ))
+            new_id = cursor.fetchone()["id"]
             conn.commit()
-            new_id = cursor.lastrowid
 
             cursor.execute("""
                 SELECT e.*, c.name as category_name, c.color as category_color

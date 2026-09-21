@@ -1,7 +1,24 @@
+# Dependencies / virtualenvs
 node_modules/
 venv/
+.venv/
 backend/venv/
+
+# Python
 __pycache__/
+*.pyc
+
+# Environment files (keep the examples)
 .env
-*.pyc 
-.env.local
+.env.*
+!.env.example
+
+# Build output (Vercel builds the frontend itself)
+frontend/dist/
+
+# User-uploaded files (runtime data, may contain personal documents)
+backend/uploads/
+
+# Misc
+.vercel/
+*.log

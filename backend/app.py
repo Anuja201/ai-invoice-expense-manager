@@ -5,9 +5,12 @@ Registers all blueprints, CORS, JWT, and error handlers.
 
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 from flask_jwt_extended import JWTManager
 from config import Config
 import os
+import re
+import logging
 
 # Import route blueprints
 from routes.auth import auth_bp, BLOCKLIST
@@ -24,9 +27,13 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
+    cors_origins = list(Config.CORS_ORIGINS)
+    if Config.CORS_ORIGIN_REGEX:
+        cors_origins.append(re.compile(Config.CORS_ORIGIN_REGEX))
+
     CORS(
         app,
-        origins=Config.CORS_ORIGINS,
+        origins=cors_origins,
         supports_credentials=True
     )
 
@@ -129,8 +136,23 @@ def create_app():
             "error": "Endpoint not found"
         }), 404
 
+    @app.errorhandler(413)
+    def too_large(e):
+        return jsonify({
+            "error": "File too large. Maximum upload size is 16 MB."
+        }), 413
+
     @app.errorhandler(500)
     def server_error(e):
+        return jsonify({
+            "error": "Internal server error"
+        }), 500
+
+    @app.errorhandler(Exception)
+    def unhandled_exception(e):
+        if isinstance(e, HTTPException):
+            return jsonify({"error": e.description}), e.code
+        logging.getLogger("app").exception("Unhandled error: %s", e)
         return jsonify({
             "error": "Internal server error"
         }), 500
@@ -143,6 +165,6 @@ if __name__ == "__main__":
     app.run(
         debug=Config.DEBUG,
         host="0.0.0.0",
-        port=5000,
+        port=Config.PORT,
         use_reloader=False
     )

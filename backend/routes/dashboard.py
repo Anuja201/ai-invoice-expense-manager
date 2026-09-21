@@ -102,12 +102,12 @@ def get_monthly_chart():
         with conn.cursor() as cursor:
             # Get monthly expenses
             cursor.execute("""
-                SELECT DATE_FORMAT(receipt_date, '%%Y-%%m') as month, 
+                SELECT TO_CHAR(receipt_date, 'YYYY-MM') as month, 
                        SUM(amount) as total
                 FROM expenses
                 WHERE user_id = %s 
-                  AND receipt_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-                GROUP BY DATE_FORMAT(receipt_date, '%%Y-%%m')
+                  AND receipt_date >= CURRENT_DATE - INTERVAL '6 months'
+                GROUP BY TO_CHAR(receipt_date, 'YYYY-MM')
                 ORDER BY month
             """, (user_id,))
             expenses = cursor.fetchall()
@@ -115,12 +115,12 @@ def get_monthly_chart():
 
             # Get monthly invoices
             cursor.execute("""
-                SELECT DATE_FORMAT(created_at, '%%Y-%%m') as month,
+                SELECT TO_CHAR(created_at, 'YYYY-MM') as month,
                        SUM(total_amount) as total
                 FROM invoices
                 WHERE user_id = %s
-                  AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-                GROUP BY DATE_FORMAT(created_at, '%%Y-%%m')
+                  AND created_at >= CURRENT_DATE - INTERVAL '6 months'
+                GROUP BY TO_CHAR(created_at, 'YYYY-MM')
                 ORDER BY month
             """, (user_id,))
             invoices = cursor.fetchall()
@@ -151,7 +151,7 @@ def get_category_chart():
                 LEFT JOIN expenses e ON c.id = e.category_id AND e.user_id = %s
                 WHERE c.type IN ('expense', 'both')
                 GROUP BY c.id, c.name, c.color
-                HAVING total > 0
+                HAVING COALESCE(SUM(e.amount), 0) > 0
                 ORDER BY total DESC
             """, (user_id,))
             categories = cursor.fetchall()

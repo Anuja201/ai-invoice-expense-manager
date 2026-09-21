@@ -1,35 +1,34 @@
-# Use an official Python runtime as a parent image
-FROM python:3.11-slim
+# Backend image for Render (Docker runtime).
+# Docker is used because OCR needs system packages (tesseract, poppler)
+# that Render's native Python runtime cannot apt-get install.
+FROM python:3.12-slim
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_ENV=production
 ENV DEBUG=False
 
-# Set work directory
 WORKDIR /app
 
-# Install system dependencies (including Tesseract OCR and dependencies for pdf2image)
+# Tesseract OCR + poppler (pdf2image). libgl1-mesa-glx was removed from current
+# Debian and is only needed by non-headless OpenCV, which is not installed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
     poppler-utils \
-    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
 COPY requirements.txt /app/
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
 COPY . /app/
 
-# Ensure uploads directory exists
 RUN mkdir -p uploads
 
-# Expose port
+# Render sets PORT; default to 5000 for local `docker run`.
+ENV PORT=5000
 EXPOSE 5000
 
-# Run gunicorn WSGI server
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "3", "wsgi:app"]
+# Apply pending DB migrations (non-destructive), then start gunicorn.
+# Set RUN_MIGRATIONS=false to skip. Long timeout: OCR + Gemini calls can take >30s.
+CMD ["sh", "-c", "if [ \"${RUN_MIGRATIONS:-true}\" = \"true\" ]; then python init_db.py || exit 1; fi; exec gunicorn --bind 0.0.0.0:${PORT} --workers ${WEB_CONCURRENCY:-2} --threads 2 --timeout 120 --access-logfile - wsgi:app"]
