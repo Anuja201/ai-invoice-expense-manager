@@ -119,4 +119,9 @@ export const reportsService = {
   getData: (params) => api.get('/reports/data', { params }),
 };
 
+// Chatbot
+export const chatService = {
+  sendMessage: (message, history = []) => api.post('/chat/', { message, history }),
+};
+
 export default api;

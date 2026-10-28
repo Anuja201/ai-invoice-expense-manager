@@ -5,10 +5,11 @@ Loads environment variables and sets Flask/JWT/DB config
 
 import os
 from datetime import timedelta
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
-
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 class Config:
     # Flask Environment & Debug
@@ -26,15 +27,16 @@ class Config:
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
 
     # PostgreSQL Database
-    # Production (Railway): set DATABASE_URL. Local dev: DATABASE_URL or DB_* vars.
+    # Production (Supabase / Railway): set DATABASE_URL (Transaction Pooler port 6543 or Session Pooler 5432).
+    # Local dev: DATABASE_URL or DB_* vars.
     DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL") or "").strip()
     DB_HOST = os.getenv("DB_HOST", "localhost")
     DB_PORT = int(os.getenv("DB_PORT", 5432))
     DB_USER = os.getenv("DB_USER", "postgres")
     DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-    DB_NAME = os.getenv("DB_NAME", "invoice_manager")
-    # disable | prefer | require — use "require" for Railway's public URL
-    DB_SSLMODE = os.getenv("DB_SSLMODE", "prefer").strip()
+    DB_NAME = os.getenv("DB_NAME", "postgres")
+    # disable | prefer | require — use "require" for Supabase and Railway
+    DB_SSLMODE = os.getenv("DB_SSLMODE", "require" if os.getenv("DATABASE_URL") else "prefer").strip()
 
     # Server port (Render injects PORT)
     PORT = int(os.getenv("PORT", 5000))

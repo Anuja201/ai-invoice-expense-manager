@@ -21,6 +21,7 @@ from routes.categories import categories_bp
 from routes.predictions import predictions_bp
 from routes.insights import insights_bp
 from routes.reports import reports_bp
+from routes.chat import chat_bp
 
 
 def create_app():
@@ -105,6 +106,11 @@ def create_app():
     app.register_blueprint(
         reports_bp,
         url_prefix="/api/reports"
+    )
+
+    app.register_blueprint(
+        chat_bp,
+        url_prefix="/api/chat"
     )
 
 

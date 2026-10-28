@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
+import ChatBot from './ChatBot';
 import '../styles/Layout.css';
 
 export default function Layout({ children }) {
@@ -21,6 +22,9 @@ export default function Layout({ children }) {
           {children}
         </main>
       </div>
+
+      {/* Floating AI Financial Chatbot */}
+      <ChatBot />
     </div>
   );
 }

@@ -5,6 +5,7 @@ psycopg2-binary==2.9.10
 bcrypt==4.1.1
 python-dotenv==1.0.0
 requests==2.31.0
+openai>=1.0.0
 
 # OCR dependencies
 pytesseract==0.3.10

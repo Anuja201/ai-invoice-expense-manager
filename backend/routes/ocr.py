@@ -120,7 +120,7 @@ from config import Config
 
 # Gemini Config
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 try:
     GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "60"))
 except (TypeError, ValueError):
