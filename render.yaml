@@ -29,15 +29,15 @@ services:
         sync: false
       - key: CORS_ORIGIN_REGEX
         sync: false
-      # AI extraction provider: groq or gemini (set the matching API key)
+      # AI extraction provider: gemini or groq (set the matching API key)
       - key: AI_PROVIDER
-        value: groq
+        value: gemini
       - key: GROQ_API_KEY
         sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.5-flash
       - key: STORAGE_BACKEND
         value: local
       - key: RUN_MIGRATIONS

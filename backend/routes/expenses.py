@@ -378,6 +378,11 @@ def upload_expense():
         if amount is None or amount == 0:
             amount = invoice_data.get("subtotal")
 
+        try:
+            total_amt = float(amount) if (amount is not None and float(amount) > 0) else None
+        except (ValueError, TypeError):
+            total_amt = None
+
         raw_date = invoice_data.get("invoice_date") or invoice_data.get("due_date")
         clean_date = parse_clean_date(raw_date)
         receipt_date = clean_date if clean_date else datetime.now().strftime("%Y-%m-%d")
@@ -397,10 +402,20 @@ def upload_expense():
         # AI Categorization
         ai_result = categorize(f"{title} {vendor} {description} {raw_ocr_text[:300]}")
 
+        needs_review = bool(
+            res.get("needs_manual_review")
+            or total_amt is None
+            or not vendor
+            or not raw_ocr_text
+        )
+        review_reason = res.get("manual_review_reason")
+        if needs_review and not review_reason:
+            review_reason = "Total amount or vendor could not be verified automatically. Please verify and edit fields before saving."
+
         extracted_expense = {
             "title": title,
-            "vendor": vendor,
-            "total_amount": float(amount) if amount is not None else 0.0,
+            "vendor": vendor or None,
+            "total_amount": total_amt,  # null / None instead of 0.0 for failed or missing extraction
             "subtotal": invoice_data.get("subtotal"),
             "date": receipt_date,
             "payment_method": "upi",
@@ -410,11 +425,11 @@ def upload_expense():
             "ai_confidence": ai_result.get("confidence", 0),
             "file_name": storage_result.storage_key,
             "file_url": storage_result.file_url,
-            "insights": res.get("insights", []),
+            "insights": res.get("insights", {}),
             "validations": res.get("validations", []),
-            "needs_manual_review": False, # Basic default, or pull from validations if needed
-            "manual_review_reason": None,
-            "validation_warnings": [v.get("message") for v in res.get("validations", []) if v.get("status") in ("error", "warning") and v.get("message")]
+            "needs_manual_review": needs_review,
+            "manual_review_reason": review_reason,
+            "validation_warnings": [v.get("message") for v in res.get("validations", []) if v.get("severity") in ("error", "warning") and v.get("message")]
         }
 
         print(f"\n[EXPENSE UPLOAD LOG] File: {filename} | Method: {extraction_method}", flush=True)

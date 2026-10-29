@@ -141,11 +141,15 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
       setInsights(insObj);
 
       if (mode === 'expense') {
+        const expAmount = (data.total_amount != null && data.total_amount > 0)
+          ? data.total_amount
+          : ((data.subtotal != null && data.subtotal > 0) ? data.subtotal : '');
+
         setForm(prev => ({
           ...prev,
           title: data.title || '',
           vendor: data.vendor || '',
-          amount: data.total_amount != null ? data.total_amount : (data.subtotal != null ? data.subtotal : ''),
+          amount: expAmount,
           receipt_date: data.date || '',
           payment_method: data.payment_method || 'upi',
           description: data.description || '',
@@ -169,12 +173,29 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
         const vName = inv.vendor?.name || data.vendor || '';
         const cName = inv.customer?.name || data.customer || '';
 
-        const rawSubtotal = inv.subtotal !== null && inv.subtotal !== undefined ? parseFloat(inv.subtotal) : parseFloat(data.subtotal || 0);
-        const rawTax = inv.tax_amount !== null && inv.tax_amount !== undefined ? parseFloat(inv.tax_amount) : parseFloat(data.tax || 0);
-        const rawTotal = inv.total_amount !== null && inv.total_amount !== undefined ? parseFloat(inv.total_amount) : parseFloat(data.total_amount || 0);
+        const rawSubtotal = (inv.subtotal !== null && inv.subtotal !== undefined && inv.subtotal !== '')
+          ? parseFloat(inv.subtotal)
+          : (data.subtotal != null && data.subtotal !== '' ? parseFloat(data.subtotal) : null);
+        const rawTax = (inv.tax_amount !== null && inv.tax_amount !== undefined && inv.tax_amount !== '')
+          ? parseFloat(inv.tax_amount)
+          : (data.tax != null && data.tax !== '' ? parseFloat(data.tax) : null);
+        const rawTotal = (inv.total_amount !== null && inv.total_amount !== undefined && inv.total_amount !== '')
+          ? parseFloat(inv.total_amount)
+          : (data.total_amount != null && data.total_amount !== '' ? parseFloat(data.total_amount) : null);
 
-        const computedTotal = rawTotal > 0 ? rawTotal : (rawSubtotal + rawTax);
-        const computedSubtotal = rawSubtotal > 0 ? rawSubtotal : Math.max(0, computedTotal - rawTax);
+        let computedTotal = null;
+        if (rawTotal !== null && rawTotal > 0) {
+          computedTotal = rawTotal;
+        } else if (rawSubtotal !== null && rawSubtotal > 0) {
+          computedTotal = rawSubtotal + (rawTax || 0);
+        }
+
+        let computedSubtotal = null;
+        if (rawSubtotal !== null && rawSubtotal > 0) {
+          computedSubtotal = rawSubtotal;
+        } else if (computedTotal !== null && computedTotal > 0) {
+          computedSubtotal = Math.max(0, computedTotal - (rawTax || 0));
+        }
 
         let statusVal = (inv.payment_status || data.payment_status || 'unpaid').toLowerCase();
         if (!['unpaid', 'paid', 'overdue', 'draft', 'sent', 'cancelled'].includes(statusVal)) {
@@ -198,10 +219,12 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
           ai_category: data.ai_category || 'General',
           ai_confidence: data.ai_confidence || 90,
           items: formattedItems,
-          subtotal: round2(computedSubtotal),
-          tax_amount: round2(rawTax),
-          discount_amount: round2(inv.discount_amount !== null && inv.discount_amount !== undefined ? parseFloat(inv.discount_amount) : parseFloat(data.discount || 0)),
-          total_amount: round2(computedTotal),
+          subtotal: computedSubtotal !== null ? round2(computedSubtotal) : '',
+          tax_amount: rawTax !== null ? round2(rawTax) : '',
+          discount_amount: (inv.discount_amount !== null && inv.discount_amount !== undefined && inv.discount_amount !== '')
+            ? round2(parseFloat(inv.discount_amount))
+            : (data.discount != null && data.discount !== '' ? round2(parseFloat(data.discount)) : 0),
+          total_amount: computedTotal !== null ? round2(computedTotal) : '',
           file_name: res.data.file_name || '',
           file_url: res.data.file_url || ''
         }));
@@ -484,6 +507,31 @@ export default function AIInvoiceStudio({ mode = 'invoice', onInvoiceSaved, onSa
       {stage === 3 && (
         <div className="studio-body">
           {saveError && <div className="studio-error">{saveError}</div>}
+
+          {/* Manual Review Banner */}
+          {ocrResult?.needs_manual_review && (
+            <div style={{
+              background: '#fffbeb',
+              border: '1px solid #fde68a',
+              borderLeft: '5px solid #d97706',
+              borderRadius: '8px',
+              padding: '14px 18px',
+              marginBottom: '16px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px'
+            }}>
+              <span style={{ fontSize: '22px' }}>⚠️</span>
+              <div>
+                <strong style={{ color: '#92400e', fontSize: '14px', display: 'block' }}>
+                  Manual Review Recommended
+                </strong>
+                <span style={{ color: '#b45309', fontSize: '13px' }}>
+                  {ocrResult?.manual_review_reason || 'Please verify the extracted values (especially vendor and total amount) before saving.'}
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Validation Alerts Bar */}
           {validations.length > 0 ? (

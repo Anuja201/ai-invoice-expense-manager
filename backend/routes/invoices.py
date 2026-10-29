@@ -455,7 +455,9 @@ def upload_invoice():
             "raw_text": extracted_text,
             "structured_data": invoice_obj,
             "validations": validations_list,
-            "insights": insights_obj
+            "insights": insights_obj,
+            "needs_manual_review": result.get("needs_manual_review", False),
+            "manual_review_reason": result.get("manual_review_reason")
         }
 
         return jsonify({
@@ -469,7 +471,9 @@ def upload_invoice():
             "file_url": storage_result.file_url,
             "extraction_method": method,
             "extracted_data": extracted_data_compat,
-            "structured_data": invoice_obj
+            "structured_data": invoice_obj,
+            "needs_manual_review": result.get("needs_manual_review", False),
+            "manual_review_reason": result.get("manual_review_reason")
         }), 200
 
     except Exception as e:

@@ -120,16 +120,11 @@ from config import Config
 
 # Gemini Config
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip()
 try:
-    GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "60"))
+    GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "45"))
 except (TypeError, ValueError):
-    GEMINI_TIMEOUT = 60
-
-GEMINI_ENDPOINT = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent"
-)
+    GEMINI_TIMEOUT = 45
 
 # Groq Config (OpenAI-compatible API) — alternative to Gemini
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -137,17 +132,56 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").strip()
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
-# AI_PROVIDER: gemini | groq. Defaults to whichever key is configured (Gemini first).
+# AI_PROVIDER preference: gemini | groq (both participate in fallback cascade)
 AI_PROVIDER = os.getenv("AI_PROVIDER", "").strip().lower()
 if AI_PROVIDER not in ("gemini", "groq"):
     AI_PROVIDER = "groq" if (GROQ_API_KEY and not GEMINI_API_KEY) else "gemini"
 
 
+def _is_gemini_configured():
+    return bool(GEMINI_API_KEY) and GEMINI_API_KEY not in (
+        "YOUR_GEMINI_API_KEY", "your_gemini_api_key_here", "change-me"
+    )
+
+
+def _is_groq_configured():
+    return bool(GROQ_API_KEY) and GROQ_API_KEY not in (
+        "YOUR_GROQ_API_KEY", "your_groq_api_key_here", "change-me"
+    )
+
+
 def _ai_configured():
-    """True when the selected AI provider has an API key."""
-    if AI_PROVIDER == "groq":
-        return bool(GROQ_API_KEY)
-    return bool(GEMINI_API_KEY) and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY"
+    """True when at least one AI provider has an API key."""
+    return _is_gemini_configured() or _is_groq_configured()
+
+
+def _get_gemini_candidate_models():
+    """
+    Return ordered list of Gemini models to attempt.
+    Filters out models that return 404 for new users (e.g. gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash)
+    and prioritizes reliable, fast supported models.
+    """
+    configured = os.getenv("GEMINI_MODEL", "").strip() or GEMINI_MODEL
+    deprecated = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"}
+    models = []
+    if configured and configured not in deprecated:
+        models.append(configured)
+    for m in ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-lite-latest", "gemini-3.8-flash"]:
+        if m not in models:
+            models.append(m)
+    return models
+
+
+def _get_groq_vision_candidate_models():
+    """Return ordered list of Groq Vision models to attempt."""
+    models = []
+    if GROQ_VISION_MODEL:
+        models.append(GROQ_VISION_MODEL)
+    for m in ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview", "meta-llama/llama-4-scout-17b-16e-instruct"]:
+        if m not in models:
+            models.append(m)
+    return models
+
 
 SUPPORTED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "tiff", "bmp", "webp"}
 SUPPORTED_DOCUMENT_EXTENSIONS = {"doc", "docx"}
@@ -435,12 +469,14 @@ _IMAGE_MIME_TYPES = {
 }
 
 INVOICE_JSON_SCHEMA_PROMPT = """
-You are an expert financial OCR AI assistant. Extract structured JSON from the document.
+You are an expert financial document and invoice OCR AI assistant. Extract structured JSON from the attached document.
 
 CRITICAL INSTRUCTIONS:
-1. Return ONLY valid JSON matching the exact schema below.
+1. Return ONLY a single valid JSON object matching the exact schema below. Do not wrap in markdown or explain.
 2. NEVER HALLUCINATE OR INVENT VALUES. If a field is not explicitly present in the document, set its value to null.
-3. Keep exact dates, item names, prices, tax amounts, vendor, and customer details.
+3. If total_amount or subtotal cannot be found or read, set it to null (NEVER return 0 or 0.0 for missing/undetected amounts).
+4. Accurately extract invoice number, vendor name, vendor tax/GSTIN ID, customer name, date (YYYY-MM-DD), subtotal, tax_amount (GST/VAT), discount, total_amount, and itemized line items.
+5. In 'extracted_raw_text', provide all text visible in the document as plain readable text with linebreaks.
 
 EXPECTED JSON SCHEMA:
 {
@@ -471,18 +507,24 @@ EXPECTED JSON SCHEMA:
   "discount_amount": null,
   "total_amount": null,
   "currency": "INR",
-  "payment_status": "Paid or Unpaid or Overdue or Unknown"
+  "payment_status": "Paid or Unpaid or Overdue or Unknown",
+  "extracted_raw_text": "all plain text extracted from document or null"
 }
 """
 
 
-def _image_to_base64(image_path):
+def _image_to_base64(file_path):
     """
-    Read an image file from disk and return (base64_string, mime_type).
+    Read an image or PDF file from disk and return (base64_string, mime_type).
     Normalises TIFF/BMP images to PNG via PIL so Gemini always receives
-    a widely-supported format when the source type is exotic.
+    a widely-supported format.
     """
-    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    if ext == "pdf":
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        return b64, "application/pdf"
+
     mime_type = _IMAGE_MIME_TYPES.get(ext, "image/jpeg")
 
     # For formats that Gemini may not support well, convert to PNG via PIL
@@ -490,7 +532,7 @@ def _image_to_base64(image_path):
         try:
             from PIL import Image as _PILImage
             import io as _io
-            with _PILImage.open(image_path) as img:
+            with _PILImage.open(file_path) as img:
                 buf = _io.BytesIO()
                 img.convert("RGB").save(buf, format="PNG")
                 b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -498,34 +540,30 @@ def _image_to_base64(image_path):
         except Exception as e:
             logger.warning(f"PIL TIFF/BMP conversion failed, using raw bytes: {e}")
 
-    with open(image_path, "rb") as f:
+    with open(file_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
     return b64, mime_type
 
 
-def _call_gemini_vision_api(image_path):
+def _call_gemini_vision_api(file_path):
     """
-    Send an image directly to Gemini Vision API (inline base64) and extract
+    Send an image or PDF directly to Gemini Vision API (inline base64) and extract
     structured invoice JSON in a single round-trip.
-    This is the PRIMARY path for PNG/JPG/image uploads — no local OCR required.
-    Returns (parsed_dict_or_None, error_string_or_None, ocr_text_or_empty).
+    Iterates through supported Gemini candidate models with automatic fallback.
+    Returns (parsed_dict_or_None, error_string_or_None, ocr_text_or_empty, working_model_or_None).
     """
-    if AI_PROVIDER == "groq":
-        return _call_groq_vision_api(image_path)
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-        return None, "GEMINI_API_KEY not configured", ""
+    if not _is_gemini_configured():
+        return None, "GEMINI_API_KEY not configured", "", None
 
     try:
-        b64_data, mime_type = _image_to_base64(image_path)
+        b64_data, mime_type = _image_to_base64(file_path)
     except Exception as e:
-        return None, f"Failed to read image file: {e}", ""
+        return None, f"Failed to read file: {e}", "", None
 
-    # Two-part prompt: ask Gemini to first describe the text it reads (for raw_text)
-    # then return the structured JSON
     vision_prompt = (
         INVOICE_JSON_SCHEMA_PROMPT
-        + "\n\nAnalyse the attached image. It is a financial document (invoice, receipt, or bill). "
-        + "Extract ALL text you can read from the image, then return structured JSON."
+        + "\n\nAnalyse the attached financial document (invoice, receipt, or bill). "
+        + "Extract all text, amounts, GST/tax, dates, vendor details, and return structured JSON."
     )
 
     payload = {
@@ -541,29 +579,47 @@ def _call_gemini_vision_api(image_path):
         }
     }
 
-    try:
-        url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
-        resp = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT)
+    models_to_try = _get_gemini_candidate_models()
+    last_err = None
 
-        if resp.status_code == 200:
-            res_data = resp.json()
-            candidates = res_data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    ai_text = parts[0].get("text", "")
-                    parsed_json, err = _safe_parse_ai_json(ai_text)
-                    if parsed_json:
-                        # Reconstruct a best-effort raw_text from the structured data
-                        # so the rest of the pipeline (fallback parser, logs) work normally
-                        ocr_text = _reconstruct_text_from_vision_json(parsed_json)
-                        return parsed_json, None, ocr_text
-                    return None, f"Vision JSON parse error: {err}", ""
-            return None, "Gemini Vision returned empty candidate contents", ""
-        else:
-            return None, f"Gemini Vision HTTP {resp.status_code}: {resp.text[:300]}", ""
-    except Exception as e:
-        return None, f"Gemini Vision API request failed: {e}", ""
+    for model in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            resp = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT)
+
+            if resp.status_code == 200:
+                res_data = resp.json()
+                candidates = res_data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        ai_text = parts[0].get("text", "")
+                        parsed_json, err = _safe_parse_ai_json(ai_text)
+                        if parsed_json:
+                            ocr_text = parsed_json.get("extracted_raw_text") or _reconstruct_text_from_vision_json(parsed_json)
+                            return parsed_json, None, ocr_text, model
+                        last_err = f"Vision JSON parse error from {model}: {err}"
+                        logger.warning(last_err)
+                        continue
+                last_err = f"Gemini {model} returned empty candidates"
+                logger.warning(last_err)
+            elif resp.status_code in (404, 503, 429):
+                last_err = f"Gemini {model} HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.warning(f"{last_err} — attempting next candidate model...")
+                continue
+            else:
+                last_err = f"Gemini {model} HTTP {resp.status_code}: {resp.text[:300]}"
+                logger.warning(last_err)
+        except requests.exceptions.Timeout:
+            last_err = f"Gemini {model} request timed out ({GEMINI_TIMEOUT}s)"
+            logger.warning(f"{last_err} — attempting next candidate model...")
+            continue
+        except Exception as e:
+            last_err = f"Gemini {model} request failed: {e}"
+            logger.warning(f"{last_err} — attempting next candidate model...")
+            continue
+
+    return None, (last_err or "All Gemini models failed"), "", None
 
 
 def _reconstruct_text_from_vision_json(parsed):
@@ -577,32 +633,43 @@ def _reconstruct_text_from_vision_json(parsed):
     vendor = parsed.get("vendor") or {}
     if isinstance(vendor, dict) and vendor.get("name"):
         parts.append(f"Vendor: {vendor['name']}")
+        if vendor.get("tax_id"):
+            parts.append(f"GSTIN / Tax ID: {vendor['tax_id']}")
+        if vendor.get("address"):
+            parts.append(f"Address: {vendor['address']}")
     customer = parsed.get("customer") or {}
     if isinstance(customer, dict) and customer.get("name"):
         parts.append(f"Customer: {customer['name']}")
+        if customer.get("tax_id"):
+            parts.append(f"Customer GSTIN: {customer['tax_id']}")
     if parsed.get("invoice_number"):
         parts.append(f"Invoice No: {parsed['invoice_number']}")
     if parsed.get("invoice_date"):
         parts.append(f"Date: {parsed['invoice_date']}")
-    if parsed.get("total_amount") is not None:
-        parts.append(f"Total: {parsed['total_amount']}")
-    if parsed.get("tax_amount") is not None:
-        parts.append(f"Tax: {parsed['tax_amount']}")
+    if parsed.get("due_date"):
+        parts.append(f"Due Date: {parsed['due_date']}")
     for item in (parsed.get("items") or []):
         if isinstance(item, dict) and item.get("description"):
-            parts.append(f"Item: {item['description']} x{item.get('quantity',1)} = {item.get('total',0)}")
+            parts.append(f"Item: {item['description']} x{item.get('quantity', 1)} @ {item.get('unit_price', 0)} = {item.get('total', 0)}")
+    if parsed.get("subtotal") is not None:
+        parts.append(f"Subtotal: {parsed['subtotal']}")
+    if parsed.get("tax_amount") is not None:
+        parts.append(f"Tax / GST: {parsed['tax_amount']}")
+    if parsed.get("discount_amount") is not None:
+        parts.append(f"Discount: {parsed['discount_amount']}")
+    if parsed.get("total_amount") is not None:
+        parts.append(f"Total Amount: {parsed['total_amount']}")
     return "\n".join(parts)
 
 
 def _call_gemini_ai_api(raw_text):
     """
     Calls Gemini API to extract structured JSON from raw document text.
-    Used for PDFs and DOCX files where text has already been extracted locally.
+    Iterates through candidate models with automatic fallback.
+    Returns (parsed_dict_or_None, error_string_or_None, working_model_or_None).
     """
-    if AI_PROVIDER == "groq":
-        return _call_groq_ai_api(raw_text)
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-        return None, "GEMINI_API_KEY not configured"
+    if not _is_gemini_configured():
+        return None, "GEMINI_API_KEY not configured", None
 
     prompt = (
         INVOICE_JSON_SCHEMA_PROMPT
@@ -617,26 +684,40 @@ def _call_gemini_ai_api(raw_text):
         }
     }
 
-    try:
-        url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
-        resp = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT)
+    models_to_try = _get_gemini_candidate_models()
+    last_err = None
 
-        if resp.status_code == 200:
-            res_data = resp.json()
-            candidates = res_data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    ai_text = parts[0].get("text", "")
-                    parsed_json, err = _safe_parse_ai_json(ai_text)
-                    if parsed_json:
-                        return parsed_json, None
-                    return None, f"JSON parse error: {err}"
-            return None, "Gemini returned empty candidate contents"
-        else:
-            return None, f"Gemini HTTP {resp.status_code}: {resp.text[:200]}"
-    except Exception as e:
-        return None, f"Gemini API request failed: {e}"
+    for model in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            resp = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT)
+
+            if resp.status_code == 200:
+                res_data = resp.json()
+                candidates = res_data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        ai_text = parts[0].get("text", "")
+                        parsed_json, err = _safe_parse_ai_json(ai_text)
+                        if parsed_json:
+                            return parsed_json, None, model
+                        last_err = f"JSON parse error from {model}: {err}"
+                        continue
+                last_err = f"Gemini {model} returned empty candidate contents"
+            elif resp.status_code in (404, 503, 429):
+                last_err = f"Gemini {model} HTTP {resp.status_code}: {resp.text[:200]}"
+                continue
+            else:
+                last_err = f"Gemini {model} HTTP {resp.status_code}: {resp.text[:200]}"
+        except requests.exceptions.Timeout:
+            last_err = f"Gemini {model} request timed out"
+            continue
+        except Exception as e:
+            last_err = f"Gemini {model} request failed: {e}"
+            continue
+
+    return None, (last_err or "All Gemini models failed"), None
 
 
 def _groq_chat(model, messages):
@@ -668,19 +749,35 @@ def _groq_chat(model, messages):
         return None, f"Groq API request failed: {e}"
 
 
-def _image_to_groq_data_url(image_path, max_b64_bytes=3_500_000):
+def _file_to_groq_data_url(file_path, max_b64_bytes=3_500_000):
     """
     Return a data: URL for Groq vision (JPEG/PNG only, under Groq's 4 MB base64 limit).
+    PDFs: renders the first page to PNG.
     Other formats and large images are converted/downscaled via PIL.
     """
-    b64_data, mime_type = _image_to_base64(image_path)
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    if ext == "pdf":
+        if HAS_PYMUPDF:
+            try:
+                import fitz
+                doc = fitz.open(file_path)
+                if len(doc) > 0:
+                    pix = doc[0].get_pixmap(dpi=150)
+                    img_bytes = pix.tobytes("jpeg")
+                    doc.close()
+                    b64_data = base64.b64encode(img_bytes).decode("utf-8")
+                    return f"data:image/jpeg;base64,{b64_data}"
+            except Exception as e:
+                logger.warning(f"Failed to render PDF page for Groq: {e}")
+
+    b64_data, mime_type = _image_to_base64(file_path)
     if mime_type in ("image/png", "image/jpeg") and len(b64_data) <= max_b64_bytes:
         return f"data:{mime_type};base64,{b64_data}"
     if not HAS_PIL:
         return f"data:{mime_type};base64,{b64_data}"
     from PIL import Image as _PILImage
     import io as _io
-    with _PILImage.open(image_path) as img:
+    with _PILImage.open(file_path) as img:
         img = img.convert("RGB")
         while True:
             buf = _io.BytesIO()
@@ -692,35 +789,45 @@ def _image_to_groq_data_url(image_path, max_b64_bytes=3_500_000):
     return f"data:image/jpeg;base64,{b64_data}"
 
 
-def _call_groq_vision_api(image_path):
+def _call_groq_vision_api(file_path):
     """Groq equivalent of _call_gemini_vision_api (same return shape)."""
-    if not GROQ_API_KEY:
-        return None, "GROQ_API_KEY not configured", ""
+    if not _is_groq_configured():
+        return None, "GROQ_API_KEY not configured", "", None
     try:
-        data_url = _image_to_groq_data_url(image_path)
+        data_url = _file_to_groq_data_url(file_path)
+        if not data_url:
+            return None, "Failed to render document for Groq Vision", "", None
     except Exception as e:
-        return None, f"Failed to read image file: {e}", ""
+        return None, f"Failed to prepare document for Groq Vision: {e}", "", None
 
     vision_prompt = (
         INVOICE_JSON_SCHEMA_PROMPT
         + "\n\nAnalyse the attached image. It is a financial document (invoice, receipt, or bill). "
-        + "Extract ALL text you can read from the image, then return structured JSON."
+        + "Extract all text and structured fields, then return structured JSON."
     )
-    parsed_json, err = _groq_chat(GROQ_VISION_MODEL, [{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": vision_prompt},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ],
-    }])
-    if parsed_json:
-        return parsed_json, None, _reconstruct_text_from_vision_json(parsed_json)
-    return None, err, ""
+
+    models_to_try = _get_groq_vision_candidate_models()
+    last_err = None
+
+    for model in models_to_try:
+        parsed_json, err = _groq_chat(model, [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": vision_prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }])
+        if parsed_json:
+            ocr_text = parsed_json.get("extracted_raw_text") or _reconstruct_text_from_vision_json(parsed_json)
+            return parsed_json, None, ocr_text, model
+        last_err = err
+
+    return None, (last_err or "Groq Vision failed"), "", None
 
 
 def _call_groq_ai_api(raw_text):
     """Groq equivalent of _call_gemini_ai_api (same return shape)."""
-    if not GROQ_API_KEY:
+    if not _is_groq_configured():
         return None, "GROQ_API_KEY not configured"
     prompt = INVOICE_JSON_SCHEMA_PROMPT + f"\n\nRAW DOCUMENT TEXT:\n{raw_text[:25000]}"
     return _groq_chat(GROQ_MODEL, [{"role": "user", "content": prompt}])
@@ -1005,6 +1112,19 @@ def clean_structured_invoice_json(parsed_dict, raw_text=""):
     discount_amount = _parse_number(parsed_dict.get("discount_amount") or parsed_dict.get("discount")) or 0.0
     total_amount = _parse_number(parsed_dict.get("total_amount"))
 
+    # Never return 0.0 for missing or failed amounts — enforce None
+    if total_amount is not None and total_amount <= 0:
+        total_amount = None
+    if subtotal is not None and subtotal <= 0:
+        subtotal = None
+
+    # Calculate total if subtotal & tax exist but total is missing
+    if total_amount is None and subtotal is not None and subtotal > 0:
+        total_amount = round(subtotal + (tax_amount or 0.0) - (discount_amount or 0.0), 2)
+    # Calculate subtotal if total & tax exist but subtotal is missing
+    elif subtotal is None and total_amount is not None and total_amount > 0:
+        subtotal = round(max(0.0, total_amount - (tax_amount or 0.0) + (discount_amount or 0.0)), 2)
+
     return {
         "invoice_number": inv_num,
         "invoice_date": inv_date,
@@ -1079,6 +1199,12 @@ def validate_extracted_invoice(structured, user_id=None):
                 "severity": "warning",
                 "message": f"Grand total calculation mismatch: Subtotal ({sub_val}) + Tax ({tax_val}) - Discount ({disc_val}) = {expected_grand_total}, but extracted total is {total_val}"
             })
+    else:
+        validations.append({
+            "field": "total_amount",
+            "severity": "warning",
+            "message": "Total amount could not be detected automatically. Manual review required."
+        })
 
     inv_num = structured.get("invoice_number")
     if user_id and inv_num:
@@ -1103,24 +1229,27 @@ def validate_extracted_invoice(structured, user_id=None):
 def generate_invoice_insights(structured):
     """
     Generate financial and payment insights from structured invoice data.
+    Ensures missing total_amount is returned as null, never 0.0.
     """
     items = structured.get("items") or []
-    subtotal = float(structured.get("subtotal") or 0.0)
-    tax_amount = float(structured.get("tax_amount") or 0.0)
-    total_amount = float(structured.get("total_amount") or 0.0)
+    subtotal = structured.get("subtotal")
+    tax_amount = structured.get("tax_amount")
+    total_amount = structured.get("total_amount")
 
-    tax_percentage = round((tax_amount / subtotal) * 100, 2) if subtotal > 0 else 0.0
+    sub_float = float(subtotal) if subtotal is not None else 0.0
+    tax_float = float(tax_amount) if tax_amount is not None else 0.0
+    tax_percentage = round((tax_float / sub_float) * 100, 2) if sub_float > 0 else 0.0
 
     return {
         "item_count": len(items),
         "tax_percentage": tax_percentage,
         "payment_status": structured.get("payment_status") or "Unknown",
         "financial_insights": {
-            "total_amount": total_amount,
-            "tax_amount": tax_amount,
-            "subtotal": subtotal,
+            "total_amount": float(total_amount) if total_amount is not None else None,
+            "tax_amount": float(tax_amount) if tax_amount is not None else None,
+            "subtotal": float(subtotal) if subtotal is not None else None,
             "currency": structured.get("currency") or "INR",
-            "average_item_price": round(sum(float(i.get("unit_price", 0)) for i in items) / max(len(items), 1), 2)
+            "average_item_price": round(sum(float(i.get("unit_price", 0)) for i in items) / max(len(items), 1), 2) if items else None
         },
         "payment_insights": {
             "payment_status": structured.get("payment_status") or "Unknown",
@@ -1135,18 +1264,12 @@ def generate_invoice_insights(structured):
 
 def process_document_extraction(file_path, filename="", user_id=None):
     """
-    Main extraction function.
-
-    Image files (PNG/JPG/etc.):
-      PRIMARY  → Gemini Vision API  (inline base64, single round-trip, no local OCR needed)
-      FALLBACK → Local OCR (pytesseract / easyocr) → Gemini text API → deterministic parser
-
-    PDF files:
-      PRIMARY  → PyMuPDF / pdfplumber / pypdf digital text extraction
-      FALLBACK → Render pages to images → EasyOCR → Gemini text API
-
-    DOCX/DOC files:
-      PRIMARY  → python-docx paragraph & table extraction
+    Main extraction function implementing full fallback cascade:
+      1. Gemini Vision API (Primary for Images & PDFs)
+      2. Groq Vision API (Secondary Fallback for Images & PDFs)
+      3. Local OCR / Text extraction (Tertiary Fallback)
+      4. Gemini Text API → Groq Text API → Deterministic Rule-based Parser
+    Never returns 0.0 for failed extraction; returns None and flags manual review.
     """
     fname = filename or os.path.basename(file_path)
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
@@ -1155,66 +1278,89 @@ def process_document_extraction(file_path, filename="", user_id=None):
     raw_text = ""
     extraction_method = "unknown"
     ai_raw_json = None
-    ai_err = None
     vision_used = False
 
     logger.info(f"\n[UPLOAD]\nFilename: {fname}\nFile type: {ext.upper()}\nFile size: {file_size} bytes")
 
-    # ── Stage 1: Text / Image Extraction ──────────────────────────────────────
-    if ext in SUPPORTED_IMAGE_EXTENSIONS:
-        # PRIMARY for images: Gemini Vision API (OCR + extraction in one call)
-        if _ai_configured():
-            logger.info(f"\n[IMAGE OCR]\nUsing {AI_PROVIDER} vision API for image extraction...")
-            vision_json, vision_err, vision_text = _call_gemini_vision_api(file_path)
+    # ── Stage 1: Primary AI Vision (Gemini → Groq Vision) ─────────────────────
+    can_use_vision = ext in SUPPORTED_IMAGE_EXTENSIONS or ext == "pdf"
+
+    if can_use_vision:
+        # Step 1A: Gemini Vision API (Primary)
+        if _is_gemini_configured():
+            logger.info(f"\n[VISION OCR]\nAttempting Gemini Vision extraction for {fname}...")
+            vision_json, vision_err, vision_text, working_model = _call_gemini_vision_api(file_path)
             if vision_json:
                 ai_raw_json = vision_json
                 raw_text = vision_text or _reconstruct_text_from_vision_json(vision_json)
-                extraction_method = f"{AI_PROVIDER}_vision_ocr"
+                extraction_method = f"gemini_vision_{working_model}"
                 vision_used = True
-                logger.info(f"[IMAGE OCR] Gemini Vision succeeded. Chars reconstructed: {len(raw_text)}")
+                logger.info(f"[VISION OCR] Gemini Vision succeeded with {working_model}. Characters: {len(raw_text)}")
             else:
-                logger.warning(f"[IMAGE OCR] Gemini Vision failed ({vision_err}). Falling back to local OCR...")
+                logger.warning(f"[VISION OCR] Gemini Vision failed ({vision_err}). Attempting Groq Vision fallback...")
 
-        # FALLBACK for images: local OCR (tesseract / easyocr)
-        if not vision_used:
+        # Step 1B: Groq Vision API (Secondary Fallback)
+        if not vision_used and _is_groq_configured():
+            logger.info(f"\n[VISION OCR]\nAttempting Groq Vision extraction for {fname}...")
+            groq_json, groq_err, groq_text, groq_model = _call_groq_vision_api(file_path)
+            if groq_json:
+                ai_raw_json = groq_json
+                raw_text = groq_text or _reconstruct_text_from_vision_json(groq_json)
+                extraction_method = f"groq_vision_{groq_model}"
+                vision_used = True
+                logger.info(f"[VISION OCR] Groq Vision succeeded with {groq_model}. Characters: {len(raw_text)}")
+            else:
+                logger.warning(f"[VISION OCR] Groq Vision failed ({groq_err}). Falling back to local OCR...")
+
+    # Step 1C: Local OCR & Digital Extraction (Tertiary Fallback)
+    if not vision_used:
+        if ext in SUPPORTED_IMAGE_EXTENSIONS:
             raw_text, extraction_method = extract_text_from_image(file_path)
-            logger.info(f"[IMAGE OCR] Local OCR result — method: {extraction_method}, chars: {len(raw_text)}")
+            logger.info(f"[LOCAL OCR] Image extraction method: {extraction_method}, chars: {len(raw_text)}")
+        elif ext == "pdf":
+            raw_text, extraction_method = extract_text_from_pdf(file_path)
+            logger.info(f"[LOCAL OCR] PDF extraction method: {extraction_method}, chars: {len(raw_text)}")
+        elif ext in SUPPORTED_DOCUMENT_EXTENSIONS:
+            raw_text, extraction_method = extract_text_from_docx(file_path)
+        else:
+            raw_text = ""
+            extraction_method = "unsupported_extension"
 
-    elif ext == "pdf":
-        raw_text, extraction_method = extract_text_from_pdf(file_path)
-    elif ext in SUPPORTED_DOCUMENT_EXTENSIONS:
-        raw_text, extraction_method = extract_text_from_docx(file_path)
-    else:
-        raw_text = ""
-        extraction_method = "unsupported_extension"
-
-    logger.info(f"\n[TEXT EXTRACTION]\nExtraction method: {extraction_method}\nCharacters extracted: {len(raw_text)}\nRaw extracted text:\n{raw_text[:2000]}")
+    logger.info(f"\n[TEXT EXTRACTION]\nMethod: {extraction_method}\nCharacters: {len(raw_text)}\nRaw text snippet:\n{raw_text[:1000]}")
 
     # ── Stage 2: AI Structured Data Extraction ────────────────────────────────
-    # Skip if Gemini Vision already returned a parsed JSON (vision_used=True)
+    # If vision was not used, run structured extraction on raw_text
     if not vision_used:
-        if _ai_configured():
-            logger.info(f"\n[AI EXTRACTION]\nSending request to {AI_PROVIDER} AI model...")
-            ai_raw_json, ai_err = _call_gemini_ai_api(raw_text)
-
-        if not ai_raw_json:
-            if ai_err:
-                logger.info(f"\n[AI EXTRACTION]\nGemini API unavailable ({ai_err}). Using Fallback AI Extraction Engine...")
+        # Step 2A: Gemini Text API
+        if _is_gemini_configured() and raw_text and len(raw_text.strip()) > 10:
+            logger.info(f"\n[AI TEXT EXTRACTION]\nAttempting Gemini text extraction...")
+            ai_raw_json, ai_err, gemini_text_model = _call_gemini_ai_api(raw_text)
+            if ai_raw_json:
+                extraction_method = f"{extraction_method}+gemini_{gemini_text_model}"
             else:
-                logger.info("\n[AI EXTRACTION]\nNo AI API key configured. Using Fallback AI Extraction Engine...")
+                logger.warning(f"[AI TEXT EXTRACTION] Gemini text extraction failed: {ai_err}")
+
+        # Step 2B: Groq Text API fallback
+        if not ai_raw_json and _is_groq_configured() and raw_text and len(raw_text.strip()) > 10:
+            logger.info(f"\n[AI TEXT EXTRACTION]\nAttempting Groq text extraction fallback...")
+            ai_raw_json, ai_err = _call_groq_ai_api(raw_text)
+            if ai_raw_json:
+                extraction_method = f"{extraction_method}+groq_text"
+            else:
+                logger.warning(f"[AI TEXT EXTRACTION] Groq text extraction failed: {ai_err}")
+
+        # Step 2C: Fallback Deterministic Parser
+        if not ai_raw_json:
+            logger.info("\n[AI EXTRACTION]\nUsing Fallback Deterministic Extraction Engine...")
             ai_raw_json = _fallback_ai_structured_parser(raw_text, fname)
+            extraction_method = f"{extraction_method}+fallback_parser"
 
-    # Final safety net: if still no JSON, run deterministic parser on whatever text we have
+    # Final safety net
     if not ai_raw_json:
-        logger.warning("[AI EXTRACTION] All AI paths failed. Running deterministic parser as last resort.")
         ai_raw_json = _fallback_ai_structured_parser(raw_text, fname)
-
-    logger.info(f"\n[AI EXTRACTION]\nAI response parsed successfully.")
 
     # ── Stage 3: Clean & Format Structured JSON Schema ────────────────────────
     structured_data = clean_structured_invoice_json(ai_raw_json, raw_text)
-
-    logger.info(f"\n[STRUCTURED DATA]\nParsed JSON:\n{json.dumps(structured_data, indent=2, default=str)}")
 
     # ── Stage 4: Validation Engine ────────────────────────────────────────────
     validations = validate_extracted_invoice(structured_data, user_id=user_id)
@@ -1222,12 +1368,37 @@ def process_document_extraction(file_path, filename="", user_id=None):
     # ── Stage 5: AI Insights Engine ───────────────────────────────────────────
     insights = generate_invoice_insights(structured_data)
 
-    # Consider success if we have raw_text OR if Vision API produced structured data
-    has_meaningful_data = bool(raw_text) or bool(
-        structured_data.get("vendor", {}).get("name")
-        or structured_data.get("total_amount")
-        or structured_data.get("invoice_number")
+    total_amt = structured_data.get("total_amount")
+    vendor_name = structured_data.get("vendor", {}).get("name")
+    has_meaningful_data = bool(raw_text and len(raw_text.strip()) > 10) or bool(
+        vendor_name or (total_amt is not None and total_amt > 0) or structured_data.get("invoice_number")
     )
+
+    # Determine manual review requirement: if total amount or vendor missing or extraction failed
+    needs_manual_review = bool(
+        not has_meaningful_data
+        or total_amt is None
+        or total_amt <= 0
+        or not vendor_name
+        or "failed" in extraction_method
+        or extraction_method == "unsupported_extension"
+    )
+
+    manual_review_reason = None
+    if needs_manual_review:
+        reasons = []
+        if total_amt is None or total_amt <= 0:
+            reasons.append("total amount could not be detected")
+        if not vendor_name:
+            reasons.append("vendor name could not be detected")
+        if not has_meaningful_data:
+            reasons.append("document text could not be extracted")
+        manual_review_reason = f"Manual review required: {', '.join(reasons)}. Please verify and edit fields before saving."
+        validations.append({
+            "field": "manual_review",
+            "severity": "warning",
+            "message": manual_review_reason
+        })
 
     return {
         "success": has_meaningful_data,
@@ -1236,5 +1407,7 @@ def process_document_extraction(file_path, filename="", user_id=None):
         "invoice": structured_data,
         "insights": insights,
         "validations": validations,
-        "extraction_method": extraction_method
+        "extraction_method": extraction_method,
+        "needs_manual_review": needs_manual_review,
+        "manual_review_reason": manual_review_reason
     }

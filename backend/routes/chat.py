@@ -299,7 +299,7 @@ def chat():
                         }
                     ]
                 }
-                resp = requests.post(url, json=payload, timeout=15)
+                resp = requests.post(url, json=payload, timeout=6)
                 if resp.status_code == 200:
                     result_json = resp.json()
                     candidates = result_json.get("candidates") or []

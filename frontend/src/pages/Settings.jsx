@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { authService } from '../services/api';
 import { applyAppearance } from '../App';
 import '../styles/Settings.css';
 import '../styles/DataPage.css'; // sharing general button styling etc.
@@ -85,13 +86,18 @@ export default function Settings() {
     setTimeout(() => setShowToast(false), 3000);
   };
 
-  const handleProfileSave = (e) => {
+  const handleProfileSave = async (e) => {
     e.preventDefault();
-    localStorage.setItem('invoiceai_profile', JSON.stringify(profile));
-    if (updateUser) {
-      updateUser({ name: profile.name, email: profile.email });
+    try {
+      const res = await authService.updateProfile({ name: profile.name, company: profile.company });
+      localStorage.setItem('invoiceai_profile', JSON.stringify(profile));
+      if (updateUser) {
+        updateUser(res.data.user || { name: profile.name, company: profile.company });
+      }
+      triggerToast('Profile updated successfully!');
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to update profile');
     }
-    triggerToast('Profile updated successfully!');
   };
 
   const handleAppearanceSave = (e) => {
@@ -107,15 +113,32 @@ export default function Settings() {
     triggerToast('Notification preferences updated!');
   };
 
-  const handleSecuritySave = (e) => {
+  const handleSecuritySave = async (e) => {
     e.preventDefault();
     if (security.newPassword && security.newPassword !== security.confirmPassword) {
       alert('New passwords do not match');
       return;
     }
+    if (security.newPassword) {
+      if (!security.currentPassword) {
+        alert('Please enter your current password to set a new password');
+        return;
+      }
+      try {
+        await authService.changePassword({
+          current_password: security.currentPassword,
+          new_password: security.newPassword
+        });
+        triggerToast('Password changed successfully!');
+        setSecurity(prev => ({ ...prev, currentPassword: '', newPassword: '', confirmPassword: '' }));
+      } catch (err) {
+        alert(err.response?.data?.error || 'Failed to update password');
+        return;
+      }
+    } else {
+      triggerToast('Security settings updated successfully!');
+    }
     localStorage.setItem('invoiceai_2fa', JSON.stringify(security.twoFactor));
-    triggerToast('Security settings updated successfully!');
-    setSecurity(prev => ({ ...prev, currentPassword: '', newPassword: '', confirmPassword: '' }));
   };
 
   const handlePreferencesSave = (e) => {

@@ -127,6 +127,70 @@ def get_me():
     return jsonify({"user": user}), 200
 
 
+@auth_bp.route("/profile", methods=["PUT"])
+@jwt_required()
+def update_profile():
+    """Update authenticated user profile (name, company)."""
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    company = (data.get("company") or "").strip()
+
+    if not name:
+        return jsonify({"error": "Name cannot be empty"}), 400
+
+    parts = name.split()
+    initials = "".join(p[0].upper() for p in parts[:2])
+
+    execute_query(
+        "UPDATE users SET name = %s, company = %s, avatar_initials = %s WHERE id = %s",
+        (name, company, initials, user_id),
+        commit=True
+    )
+
+    user = execute_query(
+        "SELECT id, name, email, company, avatar_initials FROM users WHERE id = %s",
+        (user_id,), fetch_one=True
+    )
+    return jsonify({
+        "message": "Profile updated successfully",
+        "user": user
+    }), 200
+
+
+@auth_bp.route("/change-password", methods=["PUT"])
+@jwt_required()
+def change_password():
+    """Update user password with current password verification."""
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    current_password = data.get("current_password") or ""
+    new_password = data.get("new_password") or ""
+
+    if not new_password or len(new_password) < 6:
+        return jsonify({"error": "New password must be at least 6 characters"}), 400
+
+    user = execute_query(
+        "SELECT id, password_hash FROM users WHERE id = %s",
+        (user_id,), fetch_one=True
+    )
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # If the user already has a password hash, verify current password
+    if user.get("password_hash"):
+        if not current_password or not bcrypt.checkpw(current_password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+            return jsonify({"error": "Current password is incorrect"}), 400
+
+    new_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    execute_query(
+        "UPDATE users SET password_hash = %s WHERE id = %s",
+        (new_hash, user_id),
+        commit=True
+    )
+    return jsonify({"message": "Password changed successfully"}), 200
+
+
 
 @auth_bp.route("/google", methods=["POST"])
 def google_oauth():
